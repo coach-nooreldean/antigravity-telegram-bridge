@@ -256,7 +256,7 @@ def get_main_reply_keyboard():
         "keyboard": [
             [{"text": "⚡ المهام"}, {"text": "📍 أين أنا؟"}, {"text": "📸 سكرين شوت"}],
             [{"text": "📊 حالة Git"}, {"text": "📝 التغييرات Diff"}, {"text": "📂 المشاريع"}],
-            [{"text": "🌐 نفق لايف"}, {"text": "🔌 السيرفرات"}, {"text": "🔄 تحديث/ريستارت"}]
+            [{"text": "⚡ طاقة الـ PC"}, {"text": "🌐 نفق لايف"}, {"text": "🖥️ الـ HUD لايف"}]
         ],
         "resize_keyboard": True,
         "is_persistent": True
@@ -1293,6 +1293,8 @@ def sync_telegram_commands():
             ("context", "🧠 سعة الذاكرة ومؤشر سياق المحادثة"),
             ("compact", "🗜️ ضغط الذاكرة الفوري وتكثيف السياق"),
             ("db_scan", "🗄️ فحص شامل لأمان وأداء قواعد البيانات"),
+            ("power", "⚡ لوحة التحكم في طاقة وإيقاف تشغيل الكمبيوتر"),
+            ("pc", "💻 التحكم في إيقاف وتشغيل وإسبات الكمبيوتر"),
             ("stop", "🛑 إيقاف المهمة الجارية حالياً")
         ]
         
@@ -2307,6 +2309,11 @@ def handle_command(chat_id, user_id, text):
         "🌐 نفق لايف": "/preview",
         "🔌 السيرفرات": "/servers",
         "🔄 تحديث/ريستارت": "/restart",
+        "⚡ طاقة الـ PC": "/pc",
+        "طاقة": "/pc",
+        "الباور": "/pc",
+        "🖥️ الـ HUD لايف": "/hud",
+        "قفل الكمبيوتر": "/lock",
         "قائمة": "/menu",
         "مينيو": "/menu",
         "المينيو": "/menu"
@@ -2328,7 +2335,7 @@ def handle_command(chat_id, user_id, text):
         "plan", "skills", "agent", "auto", "status", "where", "servers", "sentry", "incidents", "analytics", "weekly", "test", "test_gen", "test-gen", "sre",
         "commit", "push", "cd", "projects", "git", "deploy", "stop",
         "diff", "restart", "logs", "log", "errors", "export", "transcript", "dump", "tasks", "top", "ps", "jobs",
-        "pr", "pullrequest", "menu", "hidemenu"
+        "pr", "pullrequest", "menu", "hidemenu", "hud", "pc", "power", "shutdown", "poweroff", "suspend", "sleep", "reboot"
     ]
     
     if raw_cmd not in core_commands and (raw_cmd in CACHED_SKILLS or hyphen_skill in CACHED_SKILLS):
@@ -3013,6 +3020,32 @@ def handle_command(chat_id, user_id, text):
                 ]
             }
             send_message(chat_id, "🖥️ <b>التحكم في شاشة الكمبيوتر عن بُعد:</b>\nاختر الإجراء المطلوب من الأزرار:", reply_markup=keyboard)
+
+    elif cmd in ["/pc", "/power", "/shutdown", "/poweroff", "/suspend", "/sleep", "/reboot"]:
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "🛑 إيقاف التشغيل الكامل (Power Off)", "callback_data": "pc_pwr:confirm_off"},
+                    {"text": "💤 وضع السكون (Suspend / Sleep)", "callback_data": "pc_pwr:confirm_suspend"}
+                ],
+                [
+                    {"text": "🔄 إعادة تشغيل (Reboot)", "callback_data": "pc_pwr:confirm_reboot"},
+                    {"text": "💡 إطفاء/تشغيل الشاشات", "callback_data": "pc_pwr:screens_menu"}
+                ],
+                [
+                    {"text": "📡 دليل فتح الجهاز عن بُعد (Wake-on-LAN)", "callback_data": "pc_pwr:wol_guide"}
+                ]
+            ]
+        }
+        power_msg = (
+            "⚡ <b>لوحة التحكم في طاقة الكمبيوتر (PC Power Management):</b>\n\n"
+            "• <b>حالة النظام:</b> يعمل الآن 🟢\n"
+            "• <b>IP الشبكة المحلية:</b> <code>192.168.1.14</code>\n"
+            "• <b>MAC Address (WoL):</b> <code>c4:34:6b:58:c6:d2</code>\n"
+            "• <b>واجهة الشبكة:</b> <code>eno1</code> (Wake-on-LAN مفعّل ومضبوط)\n\n"
+            "<i>اختر الإجراء المطلوب لجهازك من الأزرار التفاعلية أدناه:</i>"
+        )
+        send_message(chat_id, power_msg, reply_markup=keyboard)
 
     elif cmd in ["/screenshot", "/shot", "/screen_shot"]:
         media_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
@@ -3813,6 +3846,128 @@ def main():
                                 except Exception as e:
                                     answer_callback_query(cb_id, "خطأ")
                                     send_message(chat_id, f"❌ تعذر القفل: {escape_html(str(e))}")
+
+                    elif cb_data.startswith("pc_pwr:"):
+                        p_act = cb_data.split(":", 1)[1]
+                        
+                        if p_act == "confirm_off":
+                            kb = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "🛑 نعم، أطفئ الكمبيوتر الآن", "callback_data": "pc_pwr:do_poweroff"},
+                                        {"text": "❌ تراجع وإلغاء", "callback_data": "pc_pwr:cancel"}
+                                    ]
+                                ]
+                            }
+                            edit_message_text(
+                                chat_id, message_id,
+                                "⚠️ <b>تأكيد إيقاف تشغيل الكمبيوتر:</b>\n\n"
+                                "هل أنت متأكد من رغبتك في إيقاف تشغيل الجهاز بالكامل؟\n"
+                                "<i>(سيتوقف البوت عن الاستجابة حتى يتم إعادة تشغيل الكمبيوتر مجدداً)</i>",
+                                reply_markup=kb
+                            )
+                            answer_callback_query(cb_id, "تأكيد إيقاف التشغيل")
+
+                        elif p_act == "confirm_suspend":
+                            kb = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "💤 نعم، أدخل الجهاز في وضع السكون", "callback_data": "pc_pwr:do_suspend"},
+                                        {"text": "❌ تراجع وإلغاء", "callback_data": "pc_pwr:cancel"}
+                                    ]
+                                ]
+                            }
+                            edit_message_text(
+                                chat_id, message_id,
+                                "💤 <b>تأكيد وضع السكون (Suspend to RAM):</b>\n\n"
+                                "الجهاز سيوقف المراوح ويقلل استهلاك الطاقة للحد الأدنى (1-2W).\n"
+                                "يمكنك إيقاظه بسهولة عبر Magic Packet من الموبايل أو لوحة المفاتيح.",
+                                reply_markup=kb
+                            )
+                            answer_callback_query(cb_id, "تأكيد وضع السكون")
+
+                        elif p_act == "confirm_reboot":
+                            kb = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "🔄 نعم، أعد تشغيل الجهاز الآن", "callback_data": "pc_pwr:do_reboot"},
+                                        {"text": "❌ تراجع وإلغاء", "callback_data": "pc_pwr:cancel"}
+                                    ]
+                                ]
+                            }
+                            edit_message_text(
+                                chat_id, message_id,
+                                "🔄 <b>تأكيد إعادة تشغيل الكمبيوتر (Reboot):</b>\n\n"
+                                "سيتم إعادة تشغيل النظام بالكامل، وسيعود البوت للعمل تلقائياً فور الإقلاع.",
+                                reply_markup=kb
+                            )
+                            answer_callback_query(cb_id, "تأكيد إعادة التشغيل")
+
+                        elif p_act == "cancel":
+                            answer_callback_query(cb_id, "تم الإلغاء")
+                            handle_command(chat_id, user_id, "/pc")
+
+                        elif p_act == "screens_menu":
+                            answer_callback_query(cb_id, "شاشات الكمبيوتر")
+                            handle_command(chat_id, user_id, "/screen")
+
+                        elif p_act == "wol_guide":
+                            answer_callback_query(cb_id, "دليل تشغيل الجهاز")
+                            guide_text = (
+                                "📡 <b>دليل تشغيل الكمبيوتر عن بُعد (Power ON):</b>\n\n"
+                                "بما أن الكمبيوتر عندما يكون مغلقاً بالكامل لا تعمل عليه برامج أو اتصال بالإنترنت، هناك طريقتان لتشغيله من الموبايل:\n\n"
+                                "<b>1️⃣ الطريقة الأولى: من الموبايل داخل البيت (Wake-on-LAN):</b>\n"
+                                "• كارت الشبكة <code>eno1</code> في جهازك يدعم الـ WoL ومفعّل بالفعل ومضبوط على <code>magic</code>.\n"
+                                "• نزّل على موبايلك تطبيق مجاني زي <b>WolOn</b> أو <b>Wake On Lan</b>.\n"
+                                "• أضف جهازك بالإعدادات التالية:\n"
+                                "  - <b>MAC Address:</b> <code>c4:34:6b:58:c6:d2</code>\n"
+                                "  - <b>IP Address:</b> <code>192.168.1.14</code> (أو Broadcast: <code>192.168.1.255</code>)\n"
+                                "  - <b>Port:</b> <code>9</code>\n"
+                                "• بضغطة واحدة من موبايلك وأنت على الواي فاي، الكمبيوتر هيفتح في ثانية!\n\n"
+                                "<b>2️⃣ الطريقة الثانية: من أي مكان في العالم خارج البيت (Smart Plug):</b>\n"
+                                "• في إعدادات الـ BIOS في المازربورد، فعّل خيار: <code>Restore on AC Power Loss: Power ON</code>.\n"
+                                "• وصّل فيشة الكمبيوتر بفيشة ذكية (Smart Plug زي Tuya / Sonoff / Tapo).\n"
+                                "• من تطبيق الفيشة من أي مكان في العالم، أطفئ الفيشة وشغلها، الجهاز هيقوم فوراً ويبوت والبوت هيبعتلك رسالة إنه جاهز!"
+                            )
+                            edit_message_text(chat_id, message_id, guide_text, reply_markup={
+                                "inline_keyboard": [[{"text": "🔙 عودة للوحة الطاقة", "callback_data": "pc_pwr:cancel"}]]
+                            })
+
+                        elif p_act == "do_poweroff":
+                            answer_callback_query(cb_id, "جاري إيقاف التشغيل...")
+                            edit_message_text(
+                                chat_id, message_id,
+                                "🛑 <b>جاري إيقاف تشغيل الكمبيوتر بالكامل الآن...</b>\n\n"
+                                "👋 مع السلامة يا كوتش! سيتوقف البوت عن العمل حالاً."
+                            )
+                            def _do_off():
+                                time.sleep(1.5)
+                                subprocess.run("systemctl poweroff 2>/dev/null || loginctl poweroff", shell=True)
+                            threading.Thread(target=_do_off, daemon=True).start()
+
+                        elif p_act == "do_suspend":
+                            answer_callback_query(cb_id, "جاري إدخال الجهاز في وضع السكون...")
+                            edit_message_text(
+                                chat_id, message_id,
+                                "💤 <b>جاري إدخال الكمبيوتر في وضع السكون (Suspend to RAM)...</b>\n\n"
+                                "تم حفظ حالة كل البرامج والشاشات. يمكنك إيقاظ الجهاز عبر Wake-on-LAN أو الضغط على الكيبورد."
+                            )
+                            def _do_susp():
+                                time.sleep(1.5)
+                                subprocess.run("systemctl suspend 2>/dev/null || loginctl suspend", shell=True)
+                            threading.Thread(target=_do_susp, daemon=True).start()
+
+                        elif p_act == "do_reboot":
+                            answer_callback_query(cb_id, "جاري إعادة التشغيل...")
+                            edit_message_text(
+                                chat_id, message_id,
+                                "🔄 <b>جاري إعادة تشغيل الكمبيوتر (Rebooting)...</b>\n\n"
+                                "سيعود البوت للعمل تلقائياً بمجرد إقلاع النظام."
+                            )
+                            def _do_reb():
+                                time.sleep(1.5)
+                                subprocess.run("systemctl reboot 2>/dev/null || loginctl reboot", shell=True)
+                            threading.Thread(target=_do_reb, daemon=True).start()
 
                     elif cb_data.startswith("tunnel_port:"):
                         p_str = cb_data.split(":", 1)[1]
