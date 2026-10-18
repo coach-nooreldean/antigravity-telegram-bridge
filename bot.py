@@ -545,8 +545,8 @@ def get_task_action_buttons(ws=None):
             {"text": "🚀 Push", "callback_data": "act:push"}
         ],
         [
+            {"text": "🖥️ شاشة الـ HUD", "callback_data": "hud:open"},
             {"text": "🌿 عمل PR", "callback_data": "act:pr"},
-            {"text": "🌐 نفق لايف", "callback_data": "act:tunnel"},
             {"text": "🧪 فحص Build", "callback_data": "act:build"}
         ],
         [
@@ -789,6 +789,38 @@ def get_latest_conversation_id():
     except Exception:
         pass
     return None
+
+def get_latest_conversation_for_workspace(workspace=None):
+    """Retrieves the most recent conversation_id for the given workspace, or the overall latest."""
+    if not os.path.exists(CONV_DB_PATH):
+        return None
+    try:
+        conn = sqlite3.connect(CONV_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT conversation_id, title, workspace_uris, last_modified_time FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 30")
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            return None
+        if not workspace:
+            return rows[0][0]
+
+        target_norm = os.path.abspath(workspace).rstrip("/").lower()
+        for cid, title, uris_raw, _ in rows:
+            try:
+                uris = json.loads(uris_raw) if uris_raw else []
+                for u in uris:
+                    raw_path = u.replace("file://", "")
+                    decoded_path = urllib.parse.unquote(raw_path)
+                    if os.path.abspath(decoded_path).rstrip("/").lower() == target_norm:
+                        return cid
+            except Exception:
+                pass
+        return rows[0][0]
+    except Exception:
+        pass
+    return None
+
 
 def auto_rename_session_smartly(conv_id, prompt, workspace):
     """
@@ -1618,12 +1650,19 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
     agent_banner = f"🤖 <b>وكيل مخصص:</b> <code>{agent_name}</code>\n" if agent_name else ""
 
     current_conv_id = CONFIG.get("current_conversation_id")
+    if not current_conv_id and not CONFIG.get("force_new", False):
+        current_conv_id = get_latest_conversation_for_workspace(workspace)
+
     force_new = CONFIG.get("force_new", False)
     conv_banner = ""
     if current_conv_id and not force_new:
         c_info = get_conversation_by_id(current_conv_id)
         c_title = c_info["title"] if c_info else current_conv_id[:12]
-        conv_banner = f"💬 <b>الجلسة:</b> <code>{escape_html(c_title[:45])}</code> 🟢\n"
+        short_id = current_conv_id[:8]
+        conv_banner = (
+            f"💬 <b>الجلسة:</b> <code>{escape_html(c_title[:45])}</code> 🟢\n"
+            f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --resume {current_conv_id}</code>\n"
+        )
     elif not force_new:
         conv_banner = "💬 <b>الجلسة:</b> <i>استمرار تلقائي للمحادثة (-c)</i> 🟢\n"
     else:
@@ -1639,12 +1678,22 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
         model_effort_tags.append(f"⚡ {escape_html(active_effort)}")
     config_banner = f"<i>{' | '.join(model_effort_tags)}</i>\n" if model_effort_tags else ""
 
+    task_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "🖥️ اعرضه في شاشة الـ HUD لايف", "callback_data": f"hud:open:{current_conv_id or ''}"},
+                {"text": "🛑 إيقاف المهمة", "callback_data": "act:stop_task"}
+            ]
+        ]
+    }
+
     status_msg_id = send_message(
         chat_id,
         f"🚀 <b>بدأ تنفيذ المهمة:</b>\n"
         f"{skill_banner}{agent_banner}{conv_banner}{config_banner}"
         f"<code>{escape_html(prompt[:180])}</code>\n\n"
-        f"📁 <i>المسار ({mode_desc}):</i>\n<code>{escape_html(workspace)}</code>"
+        f"📁 <i>المسار ({mode_desc}):</i>\n<code>{escape_html(workspace)}</code>",
+        reply_markup=task_markup
     )
 
     if terminal_hud:
@@ -1711,10 +1760,15 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
                 terminal_hud.update_terminal_hud_action(step=st_val, action=act_val, activity_item=act_val, context_steps=ctx_val)
 
 
+            cid_tag = ""
+            if target_cid and "رقم الشات" not in conv_banner:
+                short_id = target_cid[:8]
+                cid_tag = f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --resume {target_cid}</code>\n"
+
             if status_msg_id:
                 progress_text = (
                     f"{spinner} <b>جاري التنفيذ المباشر...</b>\n"
-                    f"{skill_banner}{agent_banner}{conv_banner}"
+                    f"{skill_banner}{agent_banner}{conv_banner}{cid_tag}"
                     f"<code>{escape_html(prompt[:140])}</code>\n\n"
                     f"⏱️ <b>الوقت المنقضي:</b> {elapsed_str}{step_line}"
                     f"{ctx_meter}"
@@ -1723,7 +1777,10 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
                 )
                 stop_markup = {
                     "inline_keyboard": [
-                        [{"text": "🛑 إيقاف المهمة", "callback_data": "act:stop_task"}]
+                        [
+                            {"text": "🖥️ اعرضه في شاشة الـ HUD لايف", "callback_data": f"hud:open:{target_cid or ''}"},
+                            {"text": "🛑 إيقاف المهمة", "callback_data": "act:stop_task"}
+                        ]
                     ]
                 }
                 edit_message_text(chat_id, status_msg_id, progress_text, reply_markup=stop_markup)
@@ -1889,8 +1946,17 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
         if not result_text:
             result_text = "تمت المهمة بدون مخرجات نصية."
 
-        active_conv = get_conversation_by_id(CONFIG.get("current_conversation_id"))
-        conv_label = f"\n💬 <b>الجلسة:</b> <code>{escape_html(active_conv['title'])}</code>" if active_conv else ""
+        cid = CONFIG.get("current_conversation_id") or get_latest_conversation_for_workspace(workspace)
+        active_conv = get_conversation_by_id(cid)
+        conv_label = ""
+        if active_conv:
+            short_id = cid[:8] if cid else ""
+            conv_label = (
+                f"\n💬 <b>الجلسة:</b> <code>{escape_html(active_conv['title'])}</code>\n"
+                f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --resume {cid}</code>"
+            )
+        elif cid:
+            conv_label = f"\n🆔 <b>رقم الشات:</b> <code>{cid[:8]}</code> | 💻 <code>agy --resume {cid}</code>"
         header = f"✅ <b>تمت المهمة بنجاح ({duration}s):</b>{conv_label}\n\n"
 
         if terminal_hud:
@@ -3813,6 +3879,15 @@ def main():
                                 terminal_hud.close_terminal_hud()
                             answer_callback_query(cb_id, "تم إغلاق النافذة ❌")
                             handle_command(chat_id, user_id, "/hud")
+                        elif hud_act.startswith("open"):
+                            if terminal_hud:
+                                terminal_hud.set_hud_enabled(True)
+                                terminal_hud.ensure_kitty_process()
+                                try:
+                                    subprocess.run("hyprctl dispatch focuswindow class:agy-hud 2>/dev/null", shell=True)
+                                except Exception:
+                                    pass
+                            answer_callback_query(cb_id, "تم فتح شاشة الـ HUD على شاشة الكمبيوتر 🖥️")
 
                     elif cb_data.startswith("screen:"):
 

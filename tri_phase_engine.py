@@ -15,6 +15,8 @@ import json
 import logging
 import subprocess
 import shutil
+import sqlite3
+import urllib.parse
 
 logger = logging.getLogger("tri_phase_engine")
 
@@ -24,6 +26,39 @@ MODEL_FLASH = "gemini-3.8-flash-high"
 ACCOUNTS_DIR = os.path.expanduser("~/.gemini/antigravity-ide/accounts")
 ACTIVE_TOKEN_PATH = os.path.expanduser("~/.gemini/antigravity-ide/jetski-standalone-oauth-token")
 CLI_TOKEN_PATH = os.path.expanduser("~/.config/antigravity-cli/jetski-standalone-oauth-token")
+CONV_DB_PATH = os.path.expanduser("~/.gemini/antigravity-cli/conversation_summaries.db")
+
+def get_latest_conversation_for_workspace(workspace=None):
+    """Retrieves the most recent conversation_id for the given workspace, or the overall latest."""
+    if not os.path.exists(CONV_DB_PATH):
+        return None
+    try:
+        conn = sqlite3.connect(CONV_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT conversation_id, title, workspace_uris, last_modified_time FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 30")
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            return None
+        if not workspace:
+            return rows[0][0]
+
+        target_norm = os.path.abspath(workspace).rstrip("/").lower()
+        for cid, title, uris_raw, _ in rows:
+            try:
+                uris = json.loads(uris_raw) if uris_raw else []
+                for u in uris:
+                    raw_path = u.replace("file://", "")
+                    decoded_path = urllib.parse.unquote(raw_path)
+                    if os.path.abspath(decoded_path).rstrip("/").lower() == target_norm:
+                        return cid
+            except Exception:
+                pass
+        return rows[0][0]
+    except Exception:
+        pass
+    return None
+
 
 def list_accounts():
     """List all saved accounts and detect active one."""
@@ -186,29 +221,21 @@ def run_tri_phase_pipeline(task_title, requirement_prompt, workspace, chat_id, s
       Stage 3: Review & Verification Loop (Claude Opus Thinking, up to 3 iterations)
     """
     start_time = time.time()
-    
-    # 1. Initialize Telegram Progress Banner
-    initial_text = (
-        f"🚀 <b>بدء خط التجميع الهندسي الثلاثي (Tri-Phase Ensemble):</b>\n\n"
-        f"📋 <b>المهمة:</b> <code>{task_title[:100]}</code>\n"
-        f"📁 <b>المشروع:</b> <code>{os.path.basename(workspace)}</code>\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"1️⃣ <b>التخطيط المعماري:</b> 🧠 Claude Opus Thinking ⏳\n"
-        f"2️⃣ <b>كتابة الكود والتنفيذ:</b> ⚡ Gemini 3.8 Flash High ⏸️\n"
-        f"3️⃣ <b>المراجعة والاعتماد:</b> 🛡️ Claude Opus Thinking ⏸️\n"
-        f"━━━━━━━━━━━━━━━━━━"
-    )
-    banner_msg_id = send_message_func(chat_id, initial_text)
+    active_cid = get_latest_conversation_for_workspace(workspace)
+    proj_name = os.path.basename(workspace.rstrip("/"))
 
-    def update_banner(p1_icon, p2_icon, p3_icon, extra_note=""):
-        if not banner_msg_id or not edit_message_text_func:
-            return
-        elapsed = int(time.time() - start_time)
+    def build_banner_text(p1_icon, p2_icon, p3_icon, extra_note="", cid=None, elapsed=0):
         el_str = f"{elapsed // 60}m {elapsed % 60}s"
+        chat_id_line = ""
+        if cid:
+            short_id = cid[:8]
+            chat_id_line = f"💬 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --resume {cid}</code>\n"
+
         txt = (
             f"🚀 <b>خط التجميع الهندسي الثلاثي (Tri-Phase Ensemble):</b>\n\n"
+            f"{chat_id_line}"
             f"📋 <b>المهمة:</b> <code>{task_title[:100]}</code>\n"
-            f"📁 <b>المشروع:</b> <code>{os.path.basename(workspace)}</code>\n"
+            f"📁 <b>المشروع:</b> <code>{proj_name}</code>\n"
             f"⏱️ <b>الوقت:</b> {el_str}\n\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"1️⃣ <b>التخطيط المعماري:</b> {p1_icon}\n"
@@ -217,8 +244,38 @@ def run_tri_phase_pipeline(task_title, requirement_prompt, workspace, chat_id, s
             f"━━━━━━━━━━━━━━━━━━\n"
             f"{extra_note}"
         )
+        return txt
+
+    def get_hud_markup(cid=None):
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "🖥️ اعرضه في شاشة الـ HUD لايف", "callback_data": f"hud:open:{cid or ''}"}
+                ]
+            ]
+        }
+
+    # 1. Initialize Telegram Progress Banner
+    initial_text = build_banner_text(
+        "🧠 Claude Opus Thinking ⏳",
+        "⚡ Gemini 3.8 Flash High ⏸️",
+        "🛡️ Claude Opus Thinking ⏸️",
+        extra_note="<i>جاري التحليل المعماري وتحديد استراتيجية الحل...</i>",
+        cid=active_cid,
+        elapsed=0
+    )
+    banner_msg_id = send_message_func(chat_id, initial_text, reply_markup=get_hud_markup(active_cid))
+
+    def update_banner(p1_icon, p2_icon, p3_icon, extra_note=""):
+        nonlocal active_cid
+        if not banner_msg_id or not edit_message_text_func:
+            return
+        if not active_cid:
+            active_cid = get_latest_conversation_for_workspace(workspace)
+        elapsed = int(time.time() - start_time)
+        txt = build_banner_text(p1_icon, p2_icon, p3_icon, extra_note=extra_note, cid=active_cid, elapsed=elapsed)
         try:
-            edit_message_text_func(chat_id, banner_msg_id, txt)
+            edit_message_text_func(chat_id, banner_msg_id, txt, reply_markup=get_hud_markup(active_cid))
         except Exception:
             pass
 
