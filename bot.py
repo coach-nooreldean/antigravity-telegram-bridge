@@ -2751,6 +2751,23 @@ def handle_command(chat_id, user_id, text):
 
         threading.Thread(target=run_tri_goal, daemon=True).start()
 
+    elif cmd in ["/resume", "/continue"]:
+        conv_target = arg.strip() if arg.strip() else (CONFIG.get("current_conversation_id") or get_latest_conversation_id())
+        if not conv_target:
+            send_message(chat_id, "⚠️ لا توجد جلسة سابقة لاستئنافها.")
+            return
+        short_cid = conv_target[:8]
+        send_message(chat_id, f"🔄 <b>جاري استئناف الجلسة:</b> <code>{short_cid}</code>...\n\n<i>الأيجنت هيكمل من النقطة اللي وقف عندها بالضبط! 🚀</i>")
+        threading.Thread(
+            target=run_agent_task,
+            args=(chat_id, "Continue and complete the task from where you were interrupted. Ensure thorough inspection, test/verification, and provide a clear Arabic summary."),
+            kwargs={
+                "banner_title": f"🔄 <b>استئناف الجلسة:</b> <code>{short_cid}</code>",
+                "extra_args": ["--conversation", conv_target]
+            },
+            daemon=True
+        ).start()
+
     elif cmd in ["/grill-me", "/grill_me", "/grill"]:
         topic = arg.strip() if arg.strip() else "استجوبني واختبرني في ما هي أفضل الإضافات والتحسينات المعمارية والتطويرية لهذا المشروع؟"
         grill_prompt = (
