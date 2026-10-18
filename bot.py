@@ -70,6 +70,10 @@ active_task_lock = threading.Lock()
 current_task_info = {"running": False, "process": None, "prompt": "", "start_time": 0}
 active_question_state = {}
 active_extracted_options = {}
+ACTIVE_RUNNING_PROCESSES = []
+PENDING_DISPATCH = {}
+SESSION_TASK_QUEUE = []
+
 
 def send_message(chat_id, text, parse_mode="HTML", reply_markup=None):
     url = f"{API_URL}/sendMessage"
@@ -1620,21 +1624,22 @@ def send_projects_menu(chat_id):
 
     send_message(chat_id, msg, reply_markup={"inline_keyboard": keyboard_rows})
 
-def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_title=None):
+def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_title=None, override_workspace=None, force_new_chat=False, allow_parallel=False):
     global current_task_info
-    workspace, mode_desc = get_effective_workspace()
+    workspace, mode_desc = (override_workspace, "مخصص") if override_workspace else get_effective_workspace()
     agy_bin = CONFIG.get("agy_bin", "/home/nooreldean/.local/bin/agy")
     
-    if context_engine:
+    if context_engine and not force_new_chat:
         prompt = context_engine.prepare_prompt_with_context(prompt, workspace)
     
     with active_task_lock:
-        if current_task_info["running"]:
+        if current_task_info["running"] and not allow_parallel:
             send_message(chat_id, "⚠️ هناك مهمة سابقة قيد التنفيذ حالياً، انتظر حتى تنتهي أو اكتب /stop لإيقافها.")
             return
-        current_task_info["running"] = True
-        current_task_info["prompt"] = prompt
-        current_task_info["start_time"] = time.time()
+        if not allow_parallel:
+            current_task_info["running"] = True
+            current_task_info["prompt"] = prompt
+            current_task_info["start_time"] = time.time()
 
     # Detect if prompt invokes a known skill or special banner
     first_word = prompt.strip().split()[0].lstrip("/") if prompt.strip() else ""
@@ -1649,11 +1654,11 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
 
     agent_banner = f"🤖 <b>وكيل مخصص:</b> <code>{agent_name}</code>\n" if agent_name else ""
 
-    current_conv_id = CONFIG.get("current_conversation_id")
-    if not current_conv_id and not CONFIG.get("force_new", False):
+    current_conv_id = None if force_new_chat else CONFIG.get("current_conversation_id")
+    if not current_conv_id and not CONFIG.get("force_new", False) and not force_new_chat:
         current_conv_id = get_latest_conversation_for_workspace(workspace)
 
-    force_new = CONFIG.get("force_new", False)
+    force_new = CONFIG.get("force_new", False) or force_new_chat
     conv_banner = ""
     if current_conv_id and not force_new:
         c_info = get_conversation_by_id(current_conv_id)
@@ -1891,8 +1896,11 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
                 bufsize=1,
                 start_new_session=True
             )
-            current_task_info["process"] = process
-            current_task_info["task_timeout"] = task_timeout
+            with active_task_lock:
+                if not allow_parallel:
+                    current_task_info["process"] = process
+                    current_task_info["task_timeout"] = task_timeout
+                ACTIVE_RUNNING_PROCESSES.append(process)
             stdout, stderr = process.communicate(timeout=timeout_arg)
             duration = round(time.time() - start_time, 1)
 
@@ -2042,10 +2050,37 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
         stop_typing.set()
         mark_conversation_idle()
         with active_task_lock:
-            current_task_info["running"] = False
-            current_task_info["process"] = None
-            current_task_info["prompt"] = ""
-            current_task_info["start_time"] = 0
+            if not allow_parallel:
+                current_task_info["running"] = False
+                current_task_info["process"] = None
+                current_task_info["prompt"] = ""
+                current_task_info["start_time"] = 0
+            if 'process' in locals() and process in ACTIVE_RUNNING_PROCESSES:
+                try:
+                    ACTIVE_RUNNING_PROCESSES.remove(process)
+                except ValueError:
+                    pass
+
+        # Automatically pop and trigger next queued task for this session
+        if not allow_parallel and SESSION_TASK_QUEUE:
+            next_task = SESSION_TASK_QUEUE.pop(0)
+            ws_target = next_task.get("workspace") or workspace
+            send_message(
+                chat_id,
+                f"🔄 <b>انتهت المهمة السابقة، جاري بدء المهمة المنتظرة تلقائياً:</b>\n"
+                f"📋 <code>{escape_html(next_task['prompt'][:140])}</code>"
+            )
+            threading.Thread(
+                target=run_agent_task,
+                args=(chat_id, next_task["prompt"]),
+                kwargs={
+                    "agent_name": next_task.get("agent_name"),
+                    "extra_args": next_task.get("extra_args"),
+                    "banner_title": next_task.get("banner_title"),
+                    "override_workspace": ws_target
+                },
+                daemon=True
+            ).start()
 
 MODELS_MAP = {
     "sonnet": "claude-sonnet-4-6",
@@ -2361,6 +2396,58 @@ def get_task_status_card():
         ]
     }
     return msg, kb
+
+def prompt_task_dispatch(chat_id, prompt_text, banner_title=None, extra_args=None, agent_name=None):
+    """
+    Prompts the user to decide how to execute a new request:
+      1. Continue in the current session (queues if busy, or runs immediately)
+      2. Start in a new session (prompts for project workspace, then executes in parallel)
+      3. Cancel
+    """
+    task_id = str(int(time.time() * 1000))[-6:]
+    PENDING_DISPATCH[task_id] = {
+        "task_id": task_id,
+        "chat_id": chat_id,
+        "prompt": prompt_text,
+        "banner_title": banner_title,
+        "extra_args": extra_args,
+        "agent_name": agent_name,
+        "created_at": time.time()
+    }
+
+    ws, mode_desc = get_effective_workspace()
+    curr_pname = os.path.basename(ws.rstrip("/"))
+    cid = CONFIG.get("current_conversation_id") or get_latest_conversation_for_workspace(ws)
+    c_info = get_conversation_by_id(cid) if cid else None
+    c_title = c_info["title"] if c_info else (cid[:8] if cid else "جديدة")
+
+    is_busy = current_task_info.get("running", False) or bool(ACTIVE_RUNNING_PROCESSES)
+    busy_status = "⏳ <i>(توجد مهمة تعمل حالياً في هذا المشروع)</i>\n" if is_busy else "🟢 <i>(النظام متاح للتنفيذ الفوري)</i>\n"
+
+    msg = (
+        f"📥 <b>استلمت طلبك الجديد:</b>\n"
+        f"<code>{escape_html(prompt_text[:160])}</code>\n\n"
+        f"📍 <b>المشروع الحالي:</b> <code>{escape_html(curr_pname)}</code>\n"
+        f"💬 <b>الجلسة الحالية:</b> <code>{escape_html(c_title[:35])}</code>\n"
+        f"{busy_status}\n"
+        f"<b>كيف تود تنفيذ هذا الطلب؟</b>"
+    )
+
+    same_label = "💬 في نفس الشات" + (" (انتظار الدور ⏳)" if is_busy else " (تنفيذ فوري ⚡)")
+    kb = {
+        "inline_keyboard": [
+            [
+                {"text": same_label, "callback_data": f"dsp:same:{task_id}"}
+            ],
+            [
+                {"text": "✨ في شات جديد (اختيار المشروع 📁)", "callback_data": f"dsp:new:{task_id}"}
+            ],
+            [
+                {"text": "❌ إلغاء الطلب", "callback_data": f"dsp:cancel:{task_id}"}
+            ]
+        ]
+    }
+    send_message(chat_id, msg, reply_markup=kb)
 
 def handle_command(chat_id, user_id, text):
     TEXT_COMMAND_ALIASES = {
@@ -2847,12 +2934,28 @@ def handle_command(chat_id, user_id, text):
         send_message(chat_id, get_life_os_now())
 
     elif cmd == "/stop":
+        stopped_count = 0
         with active_task_lock:
-            if current_task_info["running"] and current_task_info["process"]:
-                current_task_info["process"].terminate()
-                send_message(chat_id, "🛑 تم إرسال أمر إيقاف المهمة الحالية.")
-            else:
-                send_message(chat_id, "لا توجد مهام قيد التشغيل حالياً.")
+            for p in list(ACTIVE_RUNNING_PROCESSES):
+                try:
+                    kill_process_tree(p)
+                    stopped_count += 1
+                except Exception:
+                    pass
+            ACTIVE_RUNNING_PROCESSES.clear()
+            if current_task_info.get("process"):
+                try:
+                    kill_process_tree(current_task_info["process"])
+                    stopped_count += 1
+                except Exception:
+                    pass
+                current_task_info["process"] = None
+            current_task_info["running"] = False
+            SESSION_TASK_QUEUE.clear()
+        if stopped_count > 0:
+            send_message(chat_id, f"🛑 <b>تم إيقاف كافة المهام الجارية بنجاح ({stopped_count} عملية) ومسح طابور الانتظار.</b>")
+        else:
+            send_message(chat_id, "لا توجد مهام قيد التشغيل حالياً.")
 
     elif cmd in ["/tasks", "/top", "/ps", "/jobs"]:
         msg, kb = get_task_status_card()
@@ -3450,8 +3553,8 @@ def handle_command(chat_id, user_id, text):
         send_message(chat_id, get_briefing_report())
 
     else:
-        # Natural Language prompt for Antigravity
-        threading.Thread(target=run_agent_task, args=(chat_id, text), daemon=True).start()
+        # Natural Language prompt for Antigravity (Route through session / new chat chooser)
+        prompt_task_dispatch(chat_id, text)
 
 def main():
     print("[+] Starting Antigravity Telegram Bot...")
@@ -3495,6 +3598,7 @@ def main():
                     user_id = cb["from"]["id"]
                     chat_id = cb["message"]["chat"]["id"]
                     cb_data = cb.get("data", "")
+                    message_id = cb.get("message", {}).get("message_id")
 
                     if user_id != CONFIG.get("allowed_user_id"):
                         answer_callback_query(cb_id, "⛔ غير مصرح لك")
@@ -3889,6 +3993,151 @@ def main():
                                     pass
                             answer_callback_query(cb_id, "تم فتح شاشة الـ HUD على شاشة الكمبيوتر 🖥️")
 
+                    elif cb_data.startswith("dsp:"):
+                        parts = cb_data.split(":")
+                        action = parts[1]
+                        task_id = parts[2]
+                        task = PENDING_DISPATCH.get(task_id)
+
+                        if action == "cancel":
+                            PENDING_DISPATCH.pop(task_id, None)
+                            answer_callback_query(cb_id, "تم إلغاء الطلب")
+                            if message_id:
+                                edit_message_text(chat_id, message_id, "❌ <i>تم إلغاء الطلب.</i>")
+
+                        elif action == "same":
+                            task = PENDING_DISPATCH.pop(task_id, None)
+                            if not task:
+                                answer_callback_query(cb_id, "انتهت صلاحية هذا الطلب")
+                                if message_id:
+                                    edit_message_text(chat_id, message_id, "⚠️ <i>انتهت صلاحية هذا الطلب، يرجى إرساله مجدداً.</i>")
+                            else:
+                                is_busy = current_task_info.get("running", False) or bool(ACTIVE_RUNNING_PROCESSES)
+                                ws, _ = get_effective_workspace()
+                                curr_pname = os.path.basename(ws.rstrip("/"))
+                                if is_busy:
+                                    task["workspace"] = ws
+                                    SESSION_TASK_QUEUE.append(task)
+                                    q_pos = len(SESSION_TASK_QUEUE)
+                                    answer_callback_query(cb_id, f"تمت الإضافة لطابور الانتظار (#{q_pos})")
+                                    if message_id:
+                                        edit_message_text(
+                                            chat_id,
+                                            message_id,
+                                            f"⏳ <b>تمت إضافة طلبك إلى قائمة الانتظار لهذا الشات!</b> (الترتيب: #{q_pos})\n\n"
+                                            f"📋 <b>المهمة:</b> <code>{escape_html(task['prompt'][:140])}</code>\n"
+                                            f"📁 <b>المشروع:</b> <code>{escape_html(curr_pname)}</code>\n\n"
+                                            f"<i>سيبدأ تنفيذه تلقائياً فور اكتمال المهمة الجارية دون مقاطعتها.</i>",
+                                            reply_markup={
+                                                "inline_keyboard": [
+                                                    [{"text": "❌ إلغاء من طابور الانتظار", "callback_data": f"q:cancel:{task_id}"}]
+                                                ]
+                                            }
+                                        )
+                                else:
+                                    answer_callback_query(cb_id, "جاري البدء فوراً ⚡")
+                                    if message_id:
+                                        edit_message_text(chat_id, message_id, "⚡ <i>جاري بدء المهمة في نفس الشات...</i>")
+                                    threading.Thread(
+                                        target=run_agent_task,
+                                        args=(chat_id, task["prompt"]),
+                                        kwargs={
+                                            "banner_title": task.get("banner_title"),
+                                            "extra_args": task.get("extra_args"),
+                                            "agent_name": task.get("agent_name"),
+                                            "override_workspace": ws
+                                        },
+                                        daemon=True
+                                    ).start()
+
+                        elif action == "new":
+                            if not task:
+                                answer_callback_query(cb_id, "انتهت صلاحية هذا الطلب")
+                                if message_id:
+                                    edit_message_text(chat_id, message_id, "⚠️ <i>انتهت صلاحية هذا الطلب، يرجى إرساله مجدداً.</i>")
+                            else:
+                                answer_callback_query(cb_id, "اختر المشروع للتشغيل")
+                                projects = discover_all_projects()
+                                curr_ws, _ = get_effective_workspace()
+                                curr_pname = os.path.basename(curr_ws.rstrip("/"))
+
+                                kb_rows = [
+                                    [{"text": f"📍 نفس المشروع ({curr_pname}) - شات جديد ✨", "callback_data": f"dsp:exec:{task_id}:curr"}]
+                                ]
+
+                                row = []
+                                for idx, p in enumerate(projects):
+                                    try:
+                                        if os.path.realpath(p["path"]) == os.path.realpath(curr_ws):
+                                            continue
+                                    except Exception:
+                                        pass
+                                    row.append({"text": f"📁 {p['name']}", "callback_data": f"dsp:exec:{task_id}:{idx}"})
+                                    if len(row) == 2:
+                                        kb_rows.append(row)
+                                        row = []
+                                if row:
+                                    kb_rows.append(row)
+
+                                kb_rows.append([{"text": "❌ إلغاء", "callback_data": f"dsp:cancel:{task_id}"}])
+
+                                if message_id:
+                                    edit_message_text(
+                                        chat_id,
+                                        message_id,
+                                        f"✨ <b>فتح شات جديد:</b>\n"
+                                        f"📋 <b>المهمة:</b> <code>{escape_html(task['prompt'][:100])}</code>\n\n"
+                                        f"اختر المشروع الذي تود فتح الشات الجديد فيه:",
+                                        reply_markup={"inline_keyboard": kb_rows}
+                                    )
+
+                        elif action == "exec":
+                            task = PENDING_DISPATCH.pop(task_id, None)
+                            if not task:
+                                answer_callback_query(cb_id, "انتهت صلاحية هذا الطلب")
+                                if message_id:
+                                    edit_message_text(chat_id, message_id, "⚠️ <i>انتهت صلاحية هذا الطلب، يرجى إرساله مجدداً.</i>")
+                            else:
+                                target_proj = parts[3]
+                                if target_proj == "curr":
+                                    target_ws, _ = get_effective_workspace()
+                                else:
+                                    p_idx = int(target_proj)
+                                    projects = discover_all_projects()
+                                    target_ws = projects[p_idx]["path"] if (0 <= p_idx < len(projects)) else get_effective_workspace()[0]
+
+                                target_pname = os.path.basename(target_ws.rstrip("/"))
+                                answer_callback_query(cb_id, f"بدء شات جديد في {target_pname} 🚀")
+                                if message_id:
+                                    edit_message_text(
+                                        chat_id,
+                                        message_id,
+                                        f"🚀 <b>جاري تشغيل شات جديد بالتوازي في:</b>\n<code>{escape_html(target_pname)}</code>..."
+                                    )
+                                threading.Thread(
+                                    target=run_agent_task,
+                                    args=(chat_id, task["prompt"]),
+                                    kwargs={
+                                        "banner_title": task.get("banner_title"),
+                                        "extra_args": task.get("extra_args"),
+                                        "agent_name": task.get("agent_name"),
+                                        "override_workspace": target_ws,
+                                        "force_new_chat": True,
+                                        "allow_parallel": True
+                                    },
+                                    daemon=True
+                                ).start()
+
+                    elif cb_data.startswith("q:"):
+                        parts = cb_data.split(":")
+                        action = parts[1]
+                        task_id = parts[2]
+                        if action == "cancel":
+                            SESSION_TASK_QUEUE = [item for item in SESSION_TASK_QUEUE if item.get("task_id") != task_id]
+                            answer_callback_query(cb_id, "تم إلغاء الطلب من قائمة الانتظار 🗑️")
+                            if message_id:
+                                edit_message_text(chat_id, message_id, "❌ <i>تم إلغاء هذا الطلب من طابور الانتظار بنجاح.</i>")
+
                     elif cb_data.startswith("screen:"):
 
                         s_action = cb_data.split(":", 1)[1]
@@ -4200,12 +4449,7 @@ def main():
                                 f"First inspect and transcribe this audio using your view_file tool, understand their exact spoken request, "
                                 f"and execute it in the workspace."
                             )
-                            threading.Thread(
-                                target=run_agent_task,
-                                args=(chat_id, voice_prompt),
-                                kwargs={"banner_title": "🎙️ <b>معالجة رسالة صوتية (Voice Note)</b>"},
-                                daemon=True
-                            ).start()
+                            prompt_task_dispatch(chat_id, voice_prompt, banner_title="🎙️ <b>معالجة رسالة صوتية (Voice Note)</b>")
                         else:
                             send_message(chat_id, "❌ تعذر تحميل الرسالة الصوتية.")
                     continue
@@ -4225,12 +4469,7 @@ def main():
                             f"View this image using your view_file tool, analyze the UI/error/code depicted in it, "
                             f"and execute the user request: {caption}"
                         )
-                        threading.Thread(
-                            target=run_agent_task,
-                            args=(chat_id, photo_prompt),
-                            kwargs={"banner_title": "📸 <b>تحليل صورة / لقطة شاشة (Screenshot Analysis)</b>"},
-                            daemon=True
-                        ).start()
+                        prompt_task_dispatch(chat_id, photo_prompt, banner_title="📸 <b>تحليل صورة / لقطة شاشة (Screenshot Analysis)</b>")
                     else:
                         send_message(chat_id, "❌ تعذر تحميل الصورة.")
                     continue
@@ -4258,12 +4497,7 @@ def main():
                                     f"The user sent a document/file saved at: {dest_path} (relative path: {rel_p}, size: {size_kb} KB).\n"
                                     f"Inspect this file using your view_file tool, understand its content, and execute the user's instructions: {caption}"
                                 )
-                                threading.Thread(
-                                    target=run_agent_task,
-                                    args=(chat_id, file_prompt),
-                                    kwargs={"banner_title": f"📥 <b>معالجة ملف مستلم:</b> <code>{escape_html(file_name)}</code> ({size_kb} KB)"},
-                                    daemon=True
-                                ).start()
+                                prompt_task_dispatch(chat_id, file_prompt, banner_title=f"📥 <b>معالجة ملف مستلم:</b> <code>{escape_html(file_name)}</code> ({size_kb} KB)")
                             else:
                                 file_kb = {
                                     "inline_keyboard": [
