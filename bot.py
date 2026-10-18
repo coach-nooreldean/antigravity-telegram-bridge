@@ -1720,127 +1720,138 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
         asked_questions = set()
         timeout_warned = False
         while not stop_progress.wait(3.5):
-            idx += 1
-            elapsed = int(time.time() - start_time)
-            spinner = spinners[idx % len(spinners)]
-            
-            if elapsed < 60:
-                elapsed_str = f"{elapsed} ثانية"
-            else:
-                elapsed_str = f"{elapsed // 60} دقيقة و {elapsed % 60} ثانية"
+            try:
+                idx += 1
+                elapsed = int(time.time() - start_time)
+                spinner = spinners[idx % len(spinners)]
+                
+                if elapsed < 60:
+                    elapsed_str = f"{elapsed} ثانية"
+                else:
+                    elapsed_str = f"{elapsed // 60} دقيقة و {elapsed % 60} ثانية"
 
-            target_cid = current_conv_id or CONFIG.get("current_conversation_id") or get_latest_conversation_id()
-            latest_action_info = get_latest_live_action(target_cid)
-            
-            step_line = ""
-            action_line = ""
-            if latest_action_info:
-                st = latest_action_info.get("step")
-                act = latest_action_info.get("action")
-                if st is not None:
-                    step_line = f" | 🔄 الخطوة: #{st}"
-                if act:
-                    action_line = f"\n🛠️ <b>الإجراء الحالي:</b> <code>{escape_html(act[:110])}</code>"
-            else:
-                try:
-                    if target_cid and os.path.exists(CONV_DB_PATH):
-                        conn = sqlite3.connect(CONV_DB_PATH)
-                        cur = conn.cursor()
-                        cur.execute("SELECT step_count FROM conversation_summaries WHERE conversation_id = ?", (target_cid,))
-                        row = cur.fetchone()
-                        conn.close()
-                        if row and row[0] is not None:
-                            step_line = f" | 🔄 الخطوة: #{row[0]}"
-                except Exception:
-                    pass
+                target_cid = current_conv_id or CONFIG.get("current_conversation_id") or get_latest_conversation_id()
+                latest_action_info = get_latest_live_action(target_cid)
+                
+                step_line = ""
+                action_line = ""
+                if latest_action_info:
+                    st = latest_action_info.get("step")
+                    act = latest_action_info.get("action")
+                    if st is not None:
+                        step_line = f" | 🔄 الخطوة: #{st}"
+                    if act:
+                        action_line = f"\n🛠️ <b>الإجراء الحالي:</b> <code>{escape_html(act[:110])}</code>"
+                else:
+                    try:
+                        if target_cid and os.path.exists(CONV_DB_PATH):
+                            conn = sqlite3.connect(CONV_DB_PATH)
+                            cur = conn.cursor()
+                            cur.execute("SELECT step_count FROM conversation_summaries WHERE conversation_id = ?", (target_cid,))
+                            row = cur.fetchone()
+                            conn.close()
+                            if row and row[0] is not None:
+                                step_line = f" | 🔄 الخطوة: #{row[0]}"
+                    except Exception:
+                        pass
 
-            ctx_meter = ""
-            if context_engine:
-                ctx_meter = f"\n{context_engine.format_live_context_badge(target_cid)}"
+                ctx_meter = ""
+                if context_engine:
+                    try:
+                        ctx_meter = f"\n{context_engine.format_live_context_badge(target_cid)}"
+                    except Exception:
+                        pass
 
-            if terminal_hud:
-                st_val = latest_action_info.get("step") if latest_action_info else None
-                act_val = latest_action_info.get("action") if latest_action_info else None
-                ctx_val = context_engine.get_conversation_step_count(target_cid) if context_engine else None
-                terminal_hud.update_terminal_hud_action(step=st_val, action=act_val, activity_item=act_val, context_steps=ctx_val)
+                if terminal_hud:
+                    try:
+                        st_val = latest_action_info.get("step") if latest_action_info else None
+                        act_val = latest_action_info.get("action") if latest_action_info else None
+                        ctx_val = None
+                        if context_engine and hasattr(context_engine, "get_conversation_step_count"):
+                            ctx_val = context_engine.get_conversation_step_count(target_cid)
+                        terminal_hud.update_terminal_hud_action(step=st_val, action=act_val, activity_item=act_val, context_steps=ctx_val)
+                    except Exception:
+                        pass
 
 
-            cid_tag = ""
-            if target_cid and "رقم الشات" not in conv_banner:
-                short_id = target_cid[:8]
-                cid_tag = f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --conversation {target_cid}</code>\n"
+                cid_tag = ""
+                if target_cid and "رقم الشات" not in conv_banner:
+                    short_id = target_cid[:8]
+                    cid_tag = f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --conversation {target_cid}</code>\n"
 
-            if status_msg_id:
-                progress_text = (
-                    f"{spinner} <b>جاري التنفيذ المباشر...</b>\n"
-                    f"{skill_banner}{agent_banner}{conv_banner}{cid_tag}"
-                    f"<code>{escape_html(prompt[:140])}</code>\n\n"
-                    f"⏱️ <b>الوقت المنقضي:</b> {elapsed_str}{step_line}"
-                    f"{ctx_meter}"
-                    f"{action_line}\n"
-                    f"📁 <i>المسار ({mode_desc}):</i> <code>{escape_html(workspace)}</code>"
-                )
-                stop_markup = {
-                    "inline_keyboard": [
-                        [
-                            {"text": "🖥️ اعرضه في شاشة الـ HUD لايف", "callback_data": f"hud:open:{target_cid or ''}"},
-                            {"text": "🛑 إيقاف المهمة", "callback_data": "act:stop_task"}
-                        ]
-                    ]
-                }
-                edit_message_text(chat_id, status_msg_id, progress_text, reply_markup=stop_markup)
-
-            # Interactive decision prompt if agent asks a question with options
-            if latest_action_info and latest_action_info.get("is_question") and latest_action_info.get("options"):
-                st_idx = latest_action_info.get("step")
-                if st_idx not in asked_questions:
-                    asked_questions.add(st_idx)
-                    q_text = latest_action_info.get("question") or "يحتاج الأيجنت لقرارك للمتابعة:"
-                    opts = latest_action_info.get("options", [])
-                    active_question_state[st_idx] = opts
-                    q_rows = []
-                    for o_idx, opt in enumerate(opts):
-                        q_rows.append([{"text": f"👉 {opt[:32]}", "callback_data": f"ans_q:{st_idx}:{o_idx}"}])
-                    send_message(
-                        chat_id,
-                        f"❓ <b>سؤال الأيجنت للمتابعة (الخطوة #{st_idx}):</b>\n\n"
-                        f"<code>{escape_html(q_text)}</code>\n\n"
-                        f"<i>اختر من الأزرار التالية ليتم إرسال إجابتك للأيجنت فوراً:</i>",
-                        reply_markup={"inline_keyboard": q_rows}
+                if status_msg_id:
+                    progress_text = (
+                        f"{spinner} <b>جاري التنفيذ المباشر...</b>\n"
+                        f"{skill_banner}{agent_banner}{conv_banner}{cid_tag}"
+                        f"<code>{escape_html(prompt[:140])}</code>\n\n"
+                        f"⏱️ <b>الوقت المنقضي:</b> {elapsed_str}{step_line}"
+                        f"{ctx_meter}"
+                        f"{action_line}\n"
+                        f"📁 <i>المسار ({mode_desc}):</i> <code>{escape_html(workspace)}</code>"
                     )
-
-            # Proactive progress ping every 5 minutes
-            if elapsed >= next_milestone:
-                next_milestone += 300
-                mins = elapsed // 60
-                act_str = latest_action_info.get("action") if latest_action_info else ""
-                act_ping = f"\n🛠️ <code>{escape_html(act_str[:100])}</code>" if act_str else ""
-                st_ping = latest_action_info.get("step") if latest_action_info else "?"
-                send_message(
-                    chat_id,
-                    f"⏱️ <b>تنبيه تقدم ({mins} دقائق مضت):</b>\n"
-                    f"المهمة مستمرة بنشاط... (الخطوة #{st_ping}){act_ping}"
-                )
-
-            # Proactive warning: only if a positive finite timeout is configured
-            curr_timeout = current_task_info.get("task_timeout", 0)
-            if curr_timeout and curr_timeout > 0:
-                if not timeout_warned and elapsed >= (curr_timeout - 300) and elapsed < curr_timeout:
-                    timeout_warned = True
-                    rem_mins = max(1, int((curr_timeout - elapsed) // 60))
-                    warn_kb = {
+                    stop_markup = {
                         "inline_keyboard": [
-                            [{"text": "⏳ تمديد المهلة +30 دقيقة إضافية", "callback_data": "act:extend_timeout"}],
-                            [{"text": "🛑 إيقاف المهمة الآن", "callback_data": "act:stop_task"}]
+                            [
+                                {"text": "🖥️ اعرضه في شاشة الـ HUD لايف", "callback_data": f"hud:open:{target_cid or ''}"},
+                                {"text": "🛑 إيقاف المهمة", "callback_data": "act:stop_task"}
+                            ]
                         ]
                     }
+                    edit_message_text(chat_id, status_msg_id, progress_text, reply_markup=stop_markup)
+
+                # Interactive decision prompt if agent asks a question with options
+                if latest_action_info and latest_action_info.get("is_question") and latest_action_info.get("options"):
+                    st_idx = latest_action_info.get("step")
+                    if st_idx not in asked_questions:
+                        asked_questions.add(st_idx)
+                        q_text = latest_action_info.get("question") or "يحتاج الأيجنت لقرارك للمتابعة:"
+                        opts = latest_action_info.get("options", [])
+                        active_question_state[st_idx] = opts
+                        q_rows = []
+                        for o_idx, opt in enumerate(opts):
+                            q_rows.append([{"text": f"👉 {opt[:32]}", "callback_data": f"ans_q:{st_idx}:{o_idx}"}])
+                        send_message(
+                            chat_id,
+                            f"❓ <b>سؤال الأيجنت للمتابعة (الخطوة #{st_idx}):</b>\n\n"
+                            f"<code>{escape_html(q_text)}</code>\n\n"
+                            f"<i>اختر من الأزرار التالية ليتم إرسال إجابتك للأيجنت فوراً:</i>",
+                            reply_markup={"inline_keyboard": q_rows}
+                        )
+
+                # Proactive progress ping every 5 minutes
+                if elapsed >= next_milestone:
+                    next_milestone += 300
+                    mins = elapsed // 60
+                    act_str = latest_action_info.get("action") if latest_action_info else ""
+                    act_ping = f"\n🛠️ <code>{escape_html(act_str[:100])}</code>" if act_str else ""
+                    st_ping = latest_action_info.get("step") if latest_action_info else "?"
                     send_message(
                         chat_id,
-                        f"⚠️ <b>تنبيه اقتراب انتهاء المهلة:</b>\n"
-                        f"المهمة مستمرة منذ {int(elapsed // 60)} دقيقة (متبقي حوالي {rem_mins} دقائق على انتهاء مهلة الـ {int(curr_timeout // 60)} دقيقة).\n\n"
-                        f"<i>إذا كانت المهمة ضخمة وترغب في استمرارها بدون مقاطعة، اضغط على زر التمديد:</i>",
-                        reply_markup=warn_kb
+                        f"⏱️ <b>تنبيه تقدم ({mins} دقائق مضت):</b>\n"
+                        f"المهمة مستمرة بنشاط... (الخطوة #{st_ping}){act_ping}"
                     )
+
+                # Proactive warning: only if a positive finite timeout is configured
+                curr_timeout = current_task_info.get("task_timeout", 0)
+                if curr_timeout and curr_timeout > 0:
+                    if not timeout_warned and elapsed >= (curr_timeout - 300) and elapsed < curr_timeout:
+                        timeout_warned = True
+                        rem_mins = max(1, int((curr_timeout - elapsed) // 60))
+                        warn_kb = {
+                            "inline_keyboard": [
+                                [{"text": "⏳ تمديد المهلة +30 دقيقة إضافية", "callback_data": "act:extend_timeout"}],
+                                [{"text": "🛑 إيقاف المهمة الآن", "callback_data": "act:stop_task"}]
+                            ]
+                        }
+                        send_message(
+                            chat_id,
+                            f"⚠️ <b>تنبيه اقتراب انتهاء المهلة:</b>\n"
+                            f"المهمة مستمرة منذ {int(elapsed // 60)} دقيقة (متبقي حوالي {rem_mins} دقائق على انتهاء مهلة الـ {int(curr_timeout // 60)} دقيقة).\n\n"
+                            f"<i>إذا كانت المهمة ضخمة وترغب في استمرارها بدون مقاطعة، اضغط على زر التمديد:</i>",
+                            reply_markup=warn_kb
+                        )
+            except Exception as loop_err:
+                pass
 
     progress_thread = threading.Thread(target=live_progress_tracker, daemon=True)
     progress_thread.start()
