@@ -479,19 +479,30 @@ def process_single_incident(incident, chat_id):
             action_rows.append([
                 {"text": "▶️ تطبيق الـ SQL في قاعدة البيانات الآن", "callback_data": f"sre_apply_sql:{incident_id}"}
             ])
-        action_rows.extend([
-            [
-                {"text": "🌐 معاينة عبر Cloudflare Tunnel", "callback_data": f"sre_preview:{incident_id}"},
-                {"text": "🔀 دمج مع الـ Main", "callback_data": f"sre_merge:{incident_id}"}
-            ],
-            [
-                {"text": "🔄 إعادة التعديل / مش عاجبني", "callback_data": f"sre_refine:{incident_id}"},
-                {"text": "📦 بناء نسخة جديدة", "callback_data": f"sre_build:{incident_id}"}
-            ],
-            [
-                {"text": "🧪 توليد وفحص Unit Tests لهذا الـ PR", "callback_data": f"sre_gen_tests:{incident_id}"}
-            ]
-        ])
+            action_rows.extend([
+                [
+                    {"text": "🔀 دمج مع الـ Main", "callback_data": f"sre_merge:{incident_id}"},
+                    {"text": "🔄 إعادة التعديل / مش عاجبني", "callback_data": f"sre_refine:{incident_id}"}
+                ],
+                [
+                    {"text": "📦 بناء نسخة جديدة", "callback_data": f"sre_build:{incident_id}"},
+                    {"text": "🧪 فحص Unit Tests لهذا الـ PR", "callback_data": f"sre_gen_tests:{incident_id}"}
+                ]
+            ])
+        else:
+            action_rows.extend([
+                [
+                    {"text": "🌐 معاينة عبر Cloudflare Tunnel", "callback_data": f"sre_preview:{incident_id}"},
+                    {"text": "🔀 دمج مع الـ Main", "callback_data": f"sre_merge:{incident_id}"}
+                ],
+                [
+                    {"text": "🔄 إعادة التعديل / مش عاجبني", "callback_data": f"sre_refine:{incident_id}"},
+                    {"text": "📦 بناء نسخة جديدة", "callback_data": f"sre_build:{incident_id}"}
+                ],
+                [
+                    {"text": "🧪 توليد وفحص Unit Tests لهذا الـ PR", "callback_data": f"sre_gen_tests:{incident_id}"}
+                ]
+            ])
         reply_markup = {"inline_keyboard": action_rows}
         
         if _SEND_MESSAGE:
@@ -766,13 +777,14 @@ def handle_sre_callback(cb_data, chat_id, message_id, user_id):
         return True
 
     # --- 2. PREVIEW IN CLOUDFLARE TUNNEL ---
+    # --- 2. PREVIEW IN CLOUDFLARE TUNNEL ---
     elif action == "sre_preview":
         if _ANSWER_CALLBACK:
             _ANSWER_CALLBACK(None, "جاري تجهيز نفق المعاينة المشفر...")
             
         # Detect active ports
         ports = [5173, 3000, 8080, 8000, 4200]
-        detected_port = 5173
+        detected_port = None
         for p in ports:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -784,15 +796,59 @@ def handle_sre_callback(cb_data, chat_id, message_id, user_id):
                 s.close()
             except Exception:
                 pass
+
+        # If no port is listening, attempt to auto-serve if static/web assets exist
+        if not detected_port and project_path and os.path.isdir(project_path):
+            web_dir = None
+            if os.path.isdir(os.path.join(project_path, "build", "web")):
+                web_dir = os.path.join(project_path, "build", "web")
+            elif os.path.isdir(os.path.join(project_path, "web")) and os.path.isfile(os.path.join(project_path, "web", "index.html")):
+                web_dir = os.path.join(project_path, "web")
+            elif os.path.isdir(os.path.join(project_path, "dist")):
+                web_dir = os.path.join(project_path, "dist")
+            elif os.path.isfile(os.path.join(project_path, "index.html")):
+                web_dir = project_path
+
+            if web_dir:
+                try:
+                    subprocess.Popen(
+                        ["python3", "-m", "http.server", "5173", "--bind", "127.0.0.1"],
+                        cwd=web_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    time.sleep(1)
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(0.5)
+                    if s.connect_ex(("127.0.0.1", 5173)) == 0:
+                        detected_port = 5173
+                    s.close()
+                except Exception as e:
+                    logger.error(f"[SRE Engine] Error auto-serving web folder: {e}")
+
+        # If still no active port, abort and guide user to prevent 502 Bad Gateway
+        if not detected_port:
+            if _SEND_MESSAGE:
+                _SEND_MESSAGE(
+                    chat_id,
+                    "⚠️ <b>تعذر فتح نفق المعاينة: لا يوجد خادم ويب نشط (Web Server)!</b>\n\n"
+                    "🔍 تم فحص المنافذ <code>[5173, 3000, 8080, 8000, 4200]</code> ولم يُعثر على خادم محلي قيد التشغيل.\n\n"
+                    "💡 <b>لتجنب ظهور خطأ Cloudflare 502 Bad Gateway:</b>\n"
+                    "1. تأكد من تشغيل خادم التطوير أولاً (مثل <code>npm run dev</code> أو <code>flutter run -d web-server --web-port=5173</code>).\n"
+                    "2. أعد الضغط على زر <b>🌐 معاينة عبر Cloudflare Tunnel</b> بعد بدء السيرفر."
+                )
+            return True
                 
         if _SEND_MESSAGE:
-            _SEND_MESSAGE(chat_id, f"🌐 <i>جاري تشغيل نفق Cloudflare للمنفذ <code>{detected_port}</code>...</i>")
+            _SEND_MESSAGE(chat_id, f"🌐 <i>تم رصد السيرفر المحلي يعمل على المنفذ <code>{detected_port}</code>. جاري تشغيل نفق Cloudflare المشفر...</i>")
             
         # Launch cloudflared tunnel
         def run_tunnel():
             try:
+                # Terminate any existing cloudflared instance
+                subprocess.run(["pkill", "-f", "cloudflared tunnel"], capture_output=True)
+                time.sleep(0.5)
+
                 p = subprocess.Popen(
-                    ["cloudflared", "tunnel", "--url", f"http://localhost:{detected_port}"],
+                    ["cloudflared", "tunnel", "--url", f"http://127.0.0.1:{detected_port}"],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
                 )
                 time.sleep(3)
@@ -814,10 +870,11 @@ def handle_sre_callback(cb_data, chat_id, message_id, user_id):
                         chat_id,
                         f"🚀 <b>رابط المعاينة المباشر (Cloudflare Tunnel):</b>\n\n"
                         f"🔗 <a href=\"{tunnel_url}\">{tunnel_url}</a>\n\n"
-                        f"📱 افتح الرابط من متصفح الموبايل لاختبار التعديل مباشرة عبر HTTPS!"
+                        f"📱 افتح الرابط من متصفح الموبايل لاختبار التعديل مباشرة عبر HTTPS!\n"
+                        f"⚡ <i>متصل بالمنفذ المحلي: <code>{detected_port}</code></i>"
                     )
                 elif _SEND_MESSAGE:
-                    _SEND_MESSAGE(chat_id, f"ℹ️ يعمل السيرفر محلياً على المنفذ <code>{detected_port}</code>. تأكد من تشغيل خادم التطوير.")
+                    _SEND_MESSAGE(chat_id, f"ℹ️ يعمل السيرفر محلياً على المنفذ <code>{detected_port}</code> ولكن تعذر استخراج رابط النفق خلال 15 ثانية.")
             except Exception as e:
                 if _SEND_MESSAGE:
                     _SEND_MESSAGE(chat_id, f"❌ تعذر فتح نفق المعاينة: {e}")

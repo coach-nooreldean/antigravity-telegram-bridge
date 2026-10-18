@@ -35,6 +35,12 @@ try:
 except ImportError:
     context_engine = None
 
+try:
+    import terminal_hud
+except ImportError:
+    terminal_hud = None
+
+
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 def load_config():
@@ -1253,7 +1259,9 @@ def sync_telegram_commands():
             ("pc", "🖥️ تقرير صحة ومواصفات الكمبيوتر والـ GPU"),
             ("file", "📄 إرسال ملف كود إلى تيليجرام كـ Document"),
             ("screen", "🖥️ إطفاء أو تشغيل الشاشات عن بُعد"),
+            ("hud", "🖥️ التحكم في تيرمينال العرض الحي ملء الشاشة"),
             ("lock", "🔒 قفل شاشة الكمبيوتر عن بُعد"),
+
             ("goal", "🎯 تنفيذ هدف كامل بدون توقف (100% Autonomous)"),
             ("grill_me", "🔥 استجواب واختبار الفكرة وسد الثغرات المعمارية"),
             ("plan", "📋 وضع خطة معمارية للمشروع قبل البدء"),
@@ -1637,7 +1645,13 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
         f"📁 <i>المسار ({mode_desc}):</i>\n<code>{escape_html(workspace)}</code>"
     )
 
+    if terminal_hud:
+        eff_m = active_model if active_model != "default" else "Claude Opus / Gemini Flash"
+        eff_e = active_effort if active_effort != "default" else "high"
+        terminal_hud.start_terminal_hud(prompt, workspace, model=eff_m, effort=eff_e)
+
     stop_typing = threading.Event()
+
     typing_thread = threading.Thread(target=keep_typing, args=(chat_id, stop_typing), daemon=True)
     typing_thread.start()
 
@@ -1687,6 +1701,13 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
             ctx_meter = ""
             if context_engine:
                 ctx_meter = f"\n{context_engine.format_live_context_badge(target_cid)}"
+
+            if terminal_hud:
+                st_val = latest_action_info.get("step") if latest_action_info else None
+                act_val = latest_action_info.get("action") if latest_action_info else None
+                ctx_val = context_engine.get_conversation_step_count(target_cid) if context_engine else None
+                terminal_hud.update_terminal_hud_action(step=st_val, action=act_val, activity_item=act_val, context_steps=ctx_val)
+
 
             if status_msg_id:
                 progress_text = (
@@ -1870,6 +1891,13 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
         conv_label = f"\n💬 <b>الجلسة:</b> <code>{escape_html(active_conv['title'])}</code>" if active_conv else ""
         header = f"✅ <b>تمت المهمة بنجاح ({duration}s):</b>{conv_label}\n\n"
 
+        if terminal_hud:
+            try:
+                mod_f = get_modified_code_files(workspace)
+                terminal_hud.finish_terminal_hud(duration=duration, summary=result_text[:400], modified_files=mod_f)
+            except Exception as he:
+                print(f"[HUD finish error] {he}")
+
         # Check if output contains interactive multiple-choice options (e.g. from grill-me or questions)
         detected_options = extract_interactive_options(result_text)
         action_markup = get_task_action_buttons(workspace)
@@ -1921,6 +1949,8 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
         if current_task_info["process"]:
             kill_process_tree(current_task_info["process"])
         mark_conversation_idle()
+        if terminal_hud:
+            terminal_hud.finish_terminal_hud(duration=current_task_info.get("task_timeout", 1800), summary="Task reached timeout limit.", modified_files=[])
         timeout_mins = int(current_task_info.get("task_timeout", 1800) / 60)
         resume_markup = {
             "inline_keyboard": [
@@ -1935,7 +1965,10 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
             reply_markup=resume_markup
         )
     except Exception as e:
+        if terminal_hud:
+            terminal_hud.finish_terminal_hud(duration=0, summary=f"Task error: {str(e)}", modified_files=[])
         send_message(chat_id, f"❌ <b>حدث خطأ أثناء التشغيل:</b>\n<code>{escape_html(str(e))}</code>")
+
     finally:
         stop_progress.set()
         stop_typing.set()
@@ -3230,6 +3263,52 @@ def handle_command(chat_id, user_id, text):
         else:
             send_message(chat_id, "⚠️ محرك SRE غير متصل حالياً.")
 
+    elif cmd in ["/hud", "/terminal_hud", "/live_hud"]:
+        parts = text.strip().split()
+        if len(parts) > 1:
+            arg = parts[1].lower()
+            if arg in ["on", "enable", "1", "true", "start"]:
+                if terminal_hud:
+                    terminal_hud.set_hud_enabled(True)
+                    terminal_hud.ensure_kitty_process()
+                send_message(chat_id, "🖥️ <b>تم تفعيل تيرمينال العرض الحي (Fullscreen Live HUD):</b> 🟢\nسيعمل التيرمينال ملء الشاشة تلقائياً مع كل مهمة.")
+                return
+            elif arg in ["off", "disable", "0", "false", "stop", "close"]:
+                if terminal_hud:
+                    terminal_hud.set_hud_enabled(False)
+                    terminal_hud.close_terminal_hud()
+                send_message(chat_id, "🖥️ <b>تم إيقاف تيرمينال العرض الحي:</b> 🔴\nتم إغلاق نافذة العرض ولن تفتح تلقائياً حتى تعيد تفعيلها.")
+                return
+
+        is_on = terminal_hud.is_hud_enabled() if terminal_hud else False
+        is_running = terminal_hud.is_kitty_hud_running() if terminal_hud else False
+        status_text = "🟢 مفعّل (Enabled)" if is_on else "🔴 متوقف (Disabled)"
+        proc_text = "🖥️ النافذة نشطة وملء الشاشة" if is_running else "💤 النافذة مغلقة حالياً"
+        
+        hud_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔴 إيقاف الـ HUD" if is_on else "🟢 تشغيل الـ HUD", "callback_data": "hud:toggle"},
+                    {"text": "📸 سكرين شوت حي", "callback_data": "act:screen"}
+                ],
+                [
+                    {"text": "🔄 إعادة فتح النافذة", "callback_data": "hud:reopen"},
+                    {"text": "❌ إغلاق النافذة", "callback_data": "hud:close"}
+                ]
+            ]
+        }
+        send_message(
+            chat_id,
+            f"🖥️ <b>لوحة تحكم تيرمينال العرض الحي (Fullscreen Live HUD):</b>\n\n"
+            f"• <b>الحالة:</b> {status_text}\n"
+            f"• <b>حالة النافذة:</b> {proc_text}\n"
+            f"• <b>دقة الشاشة:</b> Hyprland DP-4 (1680x1050 Fullscreen)\n"
+            f"• <b>حجم الخط:</b> 15pt (واضح ومقروء من لقطات الشاشة البعيدة)\n\n"
+            f"<i>يمكنك أيضاً الكتابة مباشرة: <code>/hud on</code> أو <code>/hud off</code></i>",
+            reply_markup=hud_markup
+        )
+
+
     elif cmd == "/sentry":
         ws, _ = get_effective_workspace()
         sentry_url = "https://nooreldean-coaching.sentry.io/issues/?project=4511983519858688"
@@ -3498,8 +3577,9 @@ def main():
                             answer_callback_query(cb_id, "تم تمديد المهلة 15 دقيقة إضافية!")
                             send_message(chat_id, "⏳ <b>تم تمديد مهلة تنفيذ المهمة بنجاح بمقدار 15 دقيقة إضافية!</b>")
 
-                        elif action == "shot":
+                        elif action in ["shot", "screen", "screenshot"]:
                             answer_callback_query(cb_id, "جاري التقاط الشاشة...")
+
                             media_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
                             os.makedirs(media_dir, exist_ok=True)
                             shot_path = os.path.join(media_dir, f"screen_{int(time.time())}.png")
@@ -3675,7 +3755,34 @@ def main():
                             answer_callback_query(cb_id, "خطأ")
                             send_message(chat_id, f"❌ خطأ التبديل: {escape_html(str(e))}")
 
+                    elif cb_data.startswith("hud:"):
+                        hud_act = cb_data.split(":", 1)[1]
+                        if hud_act == "toggle":
+                            curr = terminal_hud.is_hud_enabled() if terminal_hud else True
+                            new_st = not curr
+                            if terminal_hud:
+                                terminal_hud.set_hud_enabled(new_st)
+                                if new_st:
+                                    terminal_hud.ensure_kitty_process()
+                                else:
+                                    terminal_hud.close_terminal_hud()
+                            answer_callback_query(cb_id, f"تم التغيير: {'مفعّل 🟢' if new_st else 'معطّل 🔴'}")
+                            handle_command(chat_id, user_id, "/hud")
+                        elif hud_act == "reopen":
+                            if terminal_hud:
+                                terminal_hud.close_terminal_hud()
+                                time.sleep(0.3)
+                                terminal_hud.ensure_kitty_process()
+                            answer_callback_query(cb_id, "تم إعادة فتح النافذة 🖥️")
+                            handle_command(chat_id, user_id, "/hud")
+                        elif hud_act == "close":
+                            if terminal_hud:
+                                terminal_hud.close_terminal_hud()
+                            answer_callback_query(cb_id, "تم إغلاق النافذة ❌")
+                            handle_command(chat_id, user_id, "/hud")
+
                     elif cb_data.startswith("screen:"):
+
                         s_action = cb_data.split(":", 1)[1]
                         if s_action == "off":
                             try:
