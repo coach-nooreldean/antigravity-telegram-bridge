@@ -365,6 +365,9 @@ def process_single_incident(incident, chat_id):
                 [
                     {"text": "🔄 إعادة التعديل / مش عاجبني", "callback_data": f"sre_refine:{incident_id}"},
                     {"text": "📦 بناء نسخة جديدة", "callback_data": f"sre_build:{incident_id}"}
+                ],
+                [
+                    {"text": "🧪 توليد وفحص Unit Tests لهذا الـ PR", "callback_data": f"sre_gen_tests:{incident_id}"}
                 ]
             ]
         }
@@ -448,6 +451,22 @@ def handle_sre_callback(cb_data, chat_id, message_id, user_id):
         except Exception as e:
             if _SEND_MESSAGE:
                 _SEND_MESSAGE(chat_id, f"❌ خطأ أثناء الدمج: {e}")
+        return True
+
+    # --- 1.B GENERATE AUTOMATED TESTS ---
+    elif action == "sre_gen_tests":
+        if _ANSWER_CALLBACK:
+            _ANSWER_CALLBACK(None, "جاري كتابة وفحص الاختبارات...")
+        try:
+            import analytics_engine
+            threading.Thread(
+                target=analytics_engine.generate_automated_tests,
+                args=(project_path, chat_id, f"PR #{pr_num or ""} (Branch: {branch})"),
+                daemon=True
+            ).start()
+        except Exception as e:
+            if _SEND_MESSAGE:
+                _SEND_MESSAGE(chat_id, f"❌ خطأ في توليد الاختبارات: {e}")
         return True
 
     # --- 2. PREVIEW IN CLOUDFLARE TUNNEL ---

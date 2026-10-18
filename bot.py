@@ -25,6 +25,11 @@ try:
 except ImportError:
     sre_engine = None
 
+try:
+    import analytics_engine
+except ImportError:
+    analytics_engine = None
+
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 def load_config():
@@ -1258,6 +1263,8 @@ def sync_telegram_commands():
             ("sh", "⚡ تنفيذ أمر شل/ترمينال مباشر"),
             ("sentry", "🛡️ لوحة أخطاء ومشاكل Sentry"),
             ("incidents", "🚨 سجل الإصلاح التلقائي للأعطال SRE"),
+            ("analytics", "📊 التقرير الأسبوعي وهندسة الاستقرار"),
+            ("test", "🧪 توليد وفحص اختبارات Unit Tests مؤتمتة"),
             ("servers", "🌐 فحص السيرفرات والخدمات المفتوحة (Ports)"),
             ("diff", "📝 ملخص التغييرات في الكود غير المحفوظة"),
             ("tasks", "⚡ مراقبة العمليات واستهلاك المعالج والرام"),
@@ -2246,7 +2253,7 @@ def handle_command(chat_id, user_id, text):
     hyphen_skill = raw_cmd.replace("_", "-")
     core_commands = [
         "start", "help", "model", "effort", "goal", "grill_me", "grill-me", "grill",
-        "plan", "skills", "agent", "auto", "status", "where", "servers", "sentry", "incidents", "sre",
+        "plan", "skills", "agent", "auto", "status", "where", "servers", "sentry", "incidents", "analytics", "weekly", "test", "test_gen", "test-gen", "sre",
         "commit", "push", "cd", "projects", "git", "deploy", "stop",
         "diff", "restart", "logs", "log", "errors", "export", "transcript", "dump", "tasks", "top", "ps", "jobs",
         "pr", "pullrequest", "menu", "hidemenu"
@@ -3109,6 +3116,19 @@ def handle_command(chat_id, user_id, text):
             btns.append([{"text": "🔄 تحديث الخوادم", "callback_data": "act:refresh_servers"}, {"text": "🛑 إغلاق النفق النشط", "callback_data": "act:tunnel_stop"}])
             send_message(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": btns})
 
+    elif cmd in ["/analytics", "/weekly"]:
+        if analytics_engine:
+            threading.Thread(target=analytics_engine.send_weekly_digest, args=(chat_id,), daemon=True).start()
+        else:
+            send_message(chat_id, "⚠️ محرك التحليلات غير متصل حالياً.")
+
+    elif cmd in ["/test", "/tests", "/test_gen", "/test-gen"]:
+        ws, _ = get_effective_workspace()
+        if analytics_engine:
+            threading.Thread(target=analytics_engine.generate_automated_tests, args=(ws, chat_id, arg), daemon=True).start()
+        else:
+            send_message(chat_id, "⚠️ محرك توليد الاختبارات غير متصل حالياً.")
+
     elif cmd in ["/incidents", "/sre"]:
         if sre_engine:
             headers = sre_engine.get_supabase_headers()
@@ -3185,6 +3205,8 @@ def main():
     start_media_cleanup_daemon()
     if sre_engine:
         sre_engine.init_sre_engine(CONFIG, send_message, edit_message_text, answer_callback_query, run_agent_task)
+    if analytics_engine:
+        analytics_engine.init_analytics_engine(CONFIG, send_message, edit_message_text)
     offset = None
     
     # Send online notification if user id already exists
