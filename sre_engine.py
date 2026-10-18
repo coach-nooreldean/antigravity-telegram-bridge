@@ -530,12 +530,28 @@ def scan_all_databases_health(target_chat_id=None):
         "rls_disabled": {
             "title": "RLS Disabled on public table",
             "type": "SecurityVulnerability",
-            "sql": "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND rowsecurity = false;"
+            "sql": (
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname = 'public' "
+                "  AND rowsecurity = false "
+                "  AND tablename NOT LIKE '\\_%' "
+                "  AND tablename NOT IN ('schema_migrations', 'spatial_ref_sys', 'flyway_schema_history') "
+                "LIMIT 5;"
+            )
         },
         "mutable_search_path": {
             "title": "Function Search Path Mutable",
             "type": "SecurityWarning",
-            "sql": "SELECT proname FROM pg_proc JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace WHERE nspname = 'public' AND prosecdef = true AND proconfig IS NULL LIMIT 3;"
+            "sql": (
+                "SELECT proname FROM pg_proc "
+                "JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace "
+                "WHERE nspname = 'public' "
+                "  AND prosecdef = true "
+                "  AND proconfig IS NULL "
+                "  AND proname NOT LIKE '\\_%' "
+                "  AND proname NOT LIKE 'pg\\_%' "
+                "LIMIT 5;"
+            )
         },
         "unindexed_foreign_keys": {
             "title": "Unindexed Foreign Key (Slow Table Scan)",
@@ -543,14 +559,18 @@ def scan_all_databases_health(target_chat_id=None):
             "sql": (
                 "SELECT c.conrelid::regclass::text as tbl, a.attname as col "
                 "FROM pg_constraint c "
+                "JOIN pg_class cl ON cl.oid = c.conrelid "
+                "JOIN pg_namespace n ON n.oid = cl.relnamespace "
                 "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey) "
                 "WHERE c.contype = 'f' "
+                "  AND n.nspname = 'public' "
+                "  AND cl.relname NOT LIKE '\\_%' "
                 "  AND NOT EXISTS ( "
                 "    SELECT 1 FROM pg_index i "
                 "    WHERE i.indrelid = c.conrelid "
                 "      AND i.indkey[0] = a.attnum "
                 "  ) "
-                "LIMIT 3;"
+                "LIMIT 5;"
             )
         }
     }
@@ -586,7 +606,7 @@ def scan_all_databases_health(target_chat_id=None):
     incidents_url = f"{get_supabase_url()}/rest/v1/incident_queue"
     for f in findings:
         try:
-            check_url = f"{incidents_url}?issue_title=eq.{urllib.parse.quote(f['issue_title'])}&status=in.(pending,in_progress,pr_opened)&limit=1"
+            check_url = f"{incidents_url}?issue_title=eq.{urllib.parse.quote(f['issue_title'])}&status=in.(pending,in_progress,pr_opened,awaiting_approval)&limit=1"
             c_res = requests.get(check_url, headers=headers, timeout=5)
             if c_res.status_code == 200 and len(c_res.json()) > 0:
                 continue
@@ -613,8 +633,8 @@ def scan_all_databases_health(target_chat_id=None):
             _SEND_MESSAGE(
                 target_chat_id,
                 f"🛡️ <b>[DB-SRE] اكتمال فحص قواعد البيانات:</b>\n\n"
-                f"تم رصد <b>{len(findings)}</b> ملاحظة أمان وأداء، وتم إدراج <b>{queued_count}</b> مهمة إصلاح جديدة في طابور SRE.\n\n"
-                f"سيبدأ الوكيل تلقائياً في فتح فروع Git وكتابة الـ Migrations اللازمة!"
+                f"تم رصد <b>{len(findings)}</b> ملاحظة أداء/أمان في جداول التطبيق العامة.\n"
+                f"تم إرسال بطاقات الاستئذان التفاعلية لاختيار ما تريد إصلاحه بدون أي تدخل عشوائي."
             )
         else:
             _SEND_MESSAGE(
@@ -624,20 +644,20 @@ def scan_all_databases_health(target_chat_id=None):
                 f"• <code>nooreldean-super-app</code> 🟢\n"
                 f"• <code>nooreldean-life-os</code> 🟢\n"
                 f"• <code>coachdrift</code> 🟢\n\n"
-                f"لا توجد أي جداول بدون RLS أو مؤشرات مفقودة حالياً."
+                f"لا توجد أي جداول بدون RLS أو مؤشرات مفقودة في جداول التطبيق العامة."
             )
     return len(findings)
 
 def sre_worker_loop():
-    """Background polling daemon that picks up pending incidents and runs periodic DB scans."""
+    """Background polling daemon that checks for pending incidents and asks for approval before running."""
     logger.info("[SRE Engine] Background SRE Worker started.")
     last_db_scan_time = 0
     while _RUNNING:
         try:
             sre_cfg = _CONFIG.get("sre_engine", {})
             if sre_cfg.get("enabled", True):
-                # Run periodic DB health check every 30 minutes
-                if time.time() - last_db_scan_time >= 1800:
+                # Run periodic DB health check every 4 hours to avoid nuisance alerts
+                if time.time() - last_db_scan_time >= 14400:
                     last_db_scan_time = time.time()
                     threading.Thread(target=scan_all_databases_health, daemon=True).start()
 
@@ -645,7 +665,39 @@ def sre_worker_loop():
                 if incident:
                     target_chat = _CONFIG.get("allowed_user_id")
                     if target_chat:
-                        process_single_incident(incident, target_chat)
+                        auto_heal = sre_cfg.get("auto_heal", False)
+                        if auto_heal:
+                            process_single_incident(incident, target_chat)
+                        else:
+                            # Interactive Approval: Don't auto-run agent! Ask user first!
+                            incident_id = incident["id"]
+                            update_incident(incident_id, {"status": "awaiting_approval"})
+                            issue_t = incident.get("issue_title", "Untitled Advisory")
+                            p_slug = incident.get("project_slug", "unknown")
+                            src = incident.get("source", "sentry")
+                            err_t = incident.get("error_type", "Advisory")
+                            culprit = str(incident.get("culprit", "General"))
+
+                            kb = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "🛠️ موافقة: ابدأ الإصلاح وفتح PR", "callback_data": f"sre_approve:{incident_id}"},
+                                        {"text": "❌ تجاهل / ليست مشكلة", "callback_data": f"sre_ignore:{incident_id}"}
+                                    ]
+                                ]
+                            }
+                            if _SEND_MESSAGE:
+                                _SEND_MESSAGE(
+                                    target_chat,
+                                    f"⚠️ <b>[SRE Advisory] رصدنا ملاحظة جديدة:</b>\n\n"
+                                    f"📁 <b>المشروع:</b> <code>{html.escape(p_slug)}</code>\n"
+                                    f"🔍 <b>المصدر:</b> <code>{html.escape(src)}</code>\n"
+                                    f"📌 <b>العنوان:</b> {html.escape(issue_t)}\n"
+                                    f"⚡ <b>النوع:</b> <code>{html.escape(err_t)}</code>\n"
+                                    f"🎯 <b>العنصر:</b> <code>{html.escape(culprit)}</code>\n\n"
+                                    f"هل تود تشغيل وكيل الذكاء الاصطناعي لفحص المشكلة وكتابة الإصلاح؟",
+                                    reply_markup=kb
+                                )
             poll_interval = sre_cfg.get("poll_interval_seconds", 30)
             time.sleep(poll_interval)
         except Exception as e:
@@ -670,8 +722,30 @@ def handle_sre_callback(cb_data, chat_id, message_id, user_id):
     pr_num = incident.get("pr_number")
     pr_url = incident.get("pr_url", "")
     
+    # --- 0.A APPROVE REPAIR (HUMAN IN THE LOOP) ---
+    if action == "sre_approve":
+        if _ANSWER_CALLBACK:
+            _ANSWER_CALLBACK(None, "بدأ تشغيل الوكيل للإصلاح...")
+        if _EDIT_MESSAGE:
+            _EDIT_MESSAGE(chat_id, message_id, f"🚀 <b>بدأ الوكيل الذاتي العمل على فحص وإصلاح المشكلة:</b>\n\n<code>{html.escape(incident.get('issue_title', ''))}</code>\n\n<i>جاري تحليل الكود في فرع مخصص...</i>")
+        threading.Thread(
+            target=process_single_incident,
+            args=(incident, chat_id),
+            daemon=True
+        ).start()
+        return True
+
+    # --- 0.B IGNORE INCIDENT ---
+    elif action == "sre_ignore":
+        update_incident(incident_id, {"status": "ignored", "fix_summary": "Ignored by user via Telegram."})
+        if _ANSWER_CALLBACK:
+            _ANSWER_CALLBACK(None, "تم تجاهل المشكلة.")
+        if _EDIT_MESSAGE:
+            _EDIT_MESSAGE(chat_id, message_id, f"❌ <b>تم تجاهل هذه الملاحظة بناءً على طلبك:</b>\n\n<code>{html.escape(incident.get('issue_title', ''))}</code>")
+        return True
+
     # --- 0. APPLY SQL MIGRATION TO DATABASE ---
-    if action == "sre_apply_sql":
+    elif action == "sre_apply_sql":
         if _ANSWER_CALLBACK:
             _ANSWER_CALLBACK(None, "جاري تطبيق الـ SQL على قاعدة البيانات...")
         if _SEND_MESSAGE:
