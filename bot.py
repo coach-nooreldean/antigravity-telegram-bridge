@@ -1666,7 +1666,7 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
         short_id = current_conv_id[:8]
         conv_banner = (
             f"💬 <b>الجلسة:</b> <code>{escape_html(c_title[:45])}</code> 🟢\n"
-            f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --resume {current_conv_id}</code>\n"
+            f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --conversation {current_conv_id}</code>\n"
         )
     elif not force_new:
         conv_banner = "💬 <b>الجلسة:</b> <i>استمرار تلقائي للمحادثة (-c)</i> 🟢\n"
@@ -1768,7 +1768,7 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
             cid_tag = ""
             if target_cid and "رقم الشات" not in conv_banner:
                 short_id = target_cid[:8]
-                cid_tag = f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --resume {target_cid}</code>\n"
+                cid_tag = f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --conversation {target_cid}</code>\n"
 
             if status_msg_id:
                 progress_text = (
@@ -1961,10 +1961,10 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
             short_id = cid[:8] if cid else ""
             conv_label = (
                 f"\n💬 <b>الجلسة:</b> <code>{escape_html(active_conv['title'])}</code>\n"
-                f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --resume {cid}</code>"
+                f"🆔 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --conversation {cid}</code>"
             )
         elif cid:
-            conv_label = f"\n🆔 <b>رقم الشات:</b> <code>{cid[:8]}</code> | 💻 <code>agy --resume {cid}</code>"
+            conv_label = f"\n🆔 <b>رقم الشات:</b> <code>{cid[:8]}</code> | 💻 <code>agy --conversation {cid}</code>"
         header = f"✅ <b>تمت المهمة بنجاح ({duration}s):</b>{conv_label}\n\n"
 
         if terminal_hud:

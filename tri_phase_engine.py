@@ -229,7 +229,7 @@ def run_tri_phase_pipeline(task_title, requirement_prompt, workspace, chat_id, s
         chat_id_line = ""
         if cid:
             short_id = cid[:8]
-            chat_id_line = f"💬 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --resume {cid}</code>\n"
+            chat_id_line = f"💬 <b>رقم الشات:</b> <code>{short_id}</code> | 💻 <code>agy --conversation {cid}</code>\n"
 
         txt = (
             f"🚀 <b>خط التجميع الهندسي الثلاثي (Tri-Phase Ensemble):</b>\n\n"
