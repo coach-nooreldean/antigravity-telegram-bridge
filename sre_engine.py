@@ -517,89 +517,95 @@ def process_single_incident(incident, chat_id):
 
 def scan_all_databases_health(target_chat_id=None):
     """
-    Scans all registered Supabase databases for:
-    1. Public tables with RLS disabled.
-    2. Functions with mutable search path.
-    3. Unindexed foreign keys causing slow sequential scans.
-    Queues detected critical issues into incident_queue if not already logged.
+    Scans all registered Supabase databases EXCLUSIVELY for true runtime error logs
+    from the last 1 hour via Supabase Analytics/ClickHouse endpoints.
+    Filters out noise, disconnects, and theoretical linter warnings.
+    Queues detected critical runtime errors into incident_queue for human review.
     """
-    logger.info("[DB-SRE] Running scheduled Database Health & Advisor scan across projects...")
+    logger.info("[DB-SRE] Running scheduled Database Runtime Logs scan across projects...")
     findings = []
     
-    audit_queries = {
-        "rls_disabled": {
-            "title": "RLS Disabled on public table",
-            "type": "SecurityVulnerability",
-            "sql": (
-                "SELECT tablename FROM pg_tables "
-                "WHERE schemaname = 'public' "
-                "  AND rowsecurity = false "
-                "  AND tablename NOT LIKE '\\_%' "
-                "  AND tablename NOT IN ('schema_migrations', 'spatial_ref_sys', 'flyway_schema_history') "
-                "LIMIT 5;"
-            )
-        },
-        "mutable_search_path": {
-            "title": "Function Search Path Mutable",
-            "type": "SecurityWarning",
-            "sql": (
-                "SELECT proname FROM pg_proc "
-                "JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace "
-                "WHERE nspname = 'public' "
-                "  AND prosecdef = true "
-                "  AND proconfig IS NULL "
-                "  AND proname NOT LIKE '\\_%' "
-                "  AND proname NOT LIKE 'pg\\_%' "
-                "LIMIT 5;"
-            )
-        },
-        "unindexed_foreign_keys": {
-            "title": "Unindexed Foreign Key (Slow Table Scan)",
-            "type": "PerformanceAdvisory",
-            "sql": (
-                "SELECT c.conrelid::regclass::text as tbl, a.attname as col "
-                "FROM pg_constraint c "
-                "JOIN pg_class cl ON cl.oid = c.conrelid "
-                "JOIN pg_namespace n ON n.oid = cl.relnamespace "
-                "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey) "
-                "WHERE c.contype = 'f' "
-                "  AND n.nspname = 'public' "
-                "  AND cl.relname NOT LIKE '\\_%' "
-                "  AND NOT EXISTS ( "
-                "    SELECT 1 FROM pg_index i "
-                "    WHERE i.indrelid = c.conrelid "
-                "      AND i.indkey[0] = a.attnum "
-                "  ) "
-                "LIMIT 5;"
-            )
-        }
-    }
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    start_iso = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    # Precise ClickHouse SQL filtering for true application failure logs
+    log_query = """
+    SELECT id, timestamp, event_message
+    FROM logs
+    WHERE (
+            event_message ILIKE '%error%' 
+            OR event_message ILIKE '%fatal%' 
+            OR event_message ILIKE '%panic%' 
+            OR event_message ILIKE '%permission denied%' 
+            OR event_message ILIKE '%syntax error%' 
+            OR event_message ILIKE '%does not exist%' 
+            OR event_message ILIKE '%violates%' 
+            OR event_message ILIKE '%deadlock%' 
+            OR event_message ILIKE '%PGRST%'
+          )
+      AND event_message NOT ILIKE '%schema cache reload%'
+      AND event_message NOT ILIKE '%connected to PostgreSQL%'
+      AND event_message NOT ILIKE '%statement:%'
+      AND event_message NOT ILIKE '%could not receive data from client%'
+      AND event_message NOT ILIKE '%connection to client lost%'
+      AND event_message NOT ILIKE '%password authentication failed%'
+    ORDER BY timestamp DESC
+    LIMIT 10
+    """
+    
+    seen_signatures = set()
     
     for slug, info in SUPABASE_PROJECTS_REGISTRY.items():
         ref = info["ref"]
         token = get_project_supabase_token(slug)
-        url = f"https://api.supabase.com/v1/projects/{ref}/database/query"
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        url = f"https://api.supabase.com/v1/projects/{ref}/analytics/endpoints/logs"
+        headers = {"Authorization": f"Bearer {token}"}
         
-        for q_key, q_meta in audit_queries.items():
-            try:
-                res = requests.post(url, headers=headers, json={"query": q_meta["sql"]}, timeout=12)
-                if res.status_code in (200, 201):
-                    rows = res.json()
-                    if rows and isinstance(rows, list):
-                        for r in rows:
-                            culprit = r.get("tablename") or r.get("proname") or f"{r.get('tbl')}.{r.get('col')}"
-                            finding_title = f"{q_meta['title']}: {culprit}"
-                            findings.append({
-                                "project_slug": slug,
-                                "issue_title": finding_title,
-                                "error_type": q_meta["type"],
-                                "culprit": culprit,
-                                "stack_trace": f"Detected by Database SRE Health Scanner on {info['name']}"
-                            })
-            except Exception as e:
-                logger.error(f"[DB-SRE] Error scanning {slug} for {q_key}: {e}")
-                
+        try:
+            res = requests.get(url, headers=headers, params={
+                "sql": log_query,
+                "iso_timestamp_start": start_iso,
+                "iso_timestamp_end": end_iso
+            }, timeout=15)
+            
+            if res.status_code == 200:
+                data = res.json()
+                rows = data.get("result", [])
+                if rows and isinstance(rows, list):
+                    for r in rows:
+                        msg = r.get("event_message", "").strip()
+                        if not msg:
+                            continue
+                        # Deduplication signature (first 80 chars of error message + project)
+                        sig = f"{slug}:{msg[:80].lower()}"
+                        if sig in seen_signatures:
+                            continue
+                        seen_signatures.add(sig)
+                        
+                        # Classify error type
+                        err_type = "DatabaseRuntimeError"
+                        if "permission denied" in msg.lower() or "42501" in msg:
+                            err_type = "RLSPermissionDenied"
+                        elif "does not exist" in msg.lower() or "pgrst" in msg.lower():
+                            err_type = "SchemaDriftError"
+                        elif "violates" in msg.lower():
+                            err_type = "ConstraintViolation"
+                        elif "deadlock" in msg.lower():
+                            err_type = "DeadlockDetected"
+                            
+                        finding_title = f"{err_type}: {msg[:70]}"
+                        findings.append({
+                            "project_slug": slug,
+                            "issue_title": finding_title,
+                            "error_type": err_type,
+                            "culprit": msg[:120],
+                            "stack_trace": f"Real Runtime Server Log from {info['name']} at {r.get('timestamp')}:\n{msg}"
+                        })
+        except Exception as e:
+            logger.error(f"[DB-SRE] Error querying logs for {slug}: {e}")
+            
     # Push new findings into incident_queue
     queued_count = 0
     headers = get_supabase_headers()
@@ -612,9 +618,9 @@ def scan_all_databases_health(target_chat_id=None):
                 continue
                 
             payload = {
-                "source": "database",
+                "source": "database_logs",
                 "project_slug": f["project_slug"],
-                "issue_id": f"db-audit-{int(time.time())}-{queued_count}",
+                "issue_id": f"db-log-{int(time.time())}-{queued_count}",
                 "issue_title": f["issue_title"],
                 "error_type": f["error_type"],
                 "culprit": f["culprit"],
@@ -632,19 +638,19 @@ def scan_all_databases_health(target_chat_id=None):
         if queued_count > 0:
             _SEND_MESSAGE(
                 target_chat_id,
-                f"🛡️ <b>[DB-SRE] اكتمال فحص قواعد البيانات:</b>\n\n"
-                f"تم رصد <b>{len(findings)}</b> ملاحظة أداء/أمان في جداول التطبيق العامة.\n"
-                f"تم إرسال بطاقات الاستئذان التفاعلية لاختيار ما تريد إصلاحه بدون أي تدخل عشوائي."
+                f"🛡️ <b>[DB-SRE] اكتمال فحص سجلات أخطاء الـ Runtime:</b>\n\n"
+                f"تم رصد <b>{len(findings)}</b> أخطاء تشغيل حقيقية في الـ Logs خلال الساعة الماضية.\n"
+                f"تم إرسال بطاقات الاستئذان التفاعلية لاختيار ما ترغب في إصلاحه بأمان."
             )
         else:
             _SEND_MESSAGE(
                 target_chat_id,
-                f"✅ <b>[DB-SRE] قواعد البيانات سليمة ومحصنة 100%!</b>\n\n"
-                f"تم فحص المشاريع الثلاثة:\n"
+                f"✅ <b>[DB-SRE] سجلات قواعد البيانات نظيفة تماماً 100%!</b>\n\n"
+                f"تم فحص سجلات الـ Server Logs للمشاريع الثلاثة في آخر ساعة:\n"
                 f"• <code>nooreldean-super-app</code> 🟢\n"
                 f"• <code>nooreldean-life-os</code> 🟢\n"
                 f"• <code>coachdrift</code> 🟢\n\n"
-                f"لا توجد أي جداول بدون RLS أو مؤشرات مفقودة في جداول التطبيق العامة."
+                f"لا توجد أي أخطاء كويري أو انهيارات RLS أو كراشات مسجلة."
             )
     return len(findings)
 
@@ -656,8 +662,8 @@ def sre_worker_loop():
         try:
             sre_cfg = _CONFIG.get("sre_engine", {})
             if sre_cfg.get("enabled", True):
-                # Run periodic DB health check every 4 hours to avoid nuisance alerts
-                if time.time() - last_db_scan_time >= 14400:
+                # Run periodic DB runtime logs check every 1 hour (3600 seconds)
+                if time.time() - last_db_scan_time >= 3600:
                     last_db_scan_time = time.time()
                     threading.Thread(target=scan_all_databases_health, daemon=True).start()
 
