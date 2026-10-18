@@ -89,7 +89,7 @@ def get_project_supabase_token(project_slug):
             target_info = v
             break
     if not target_info:
-        target_info = SUPABASE_PROJECTS_REGISTRY.get("nooreldean-super-app")
+        target_info = SUPABASE_PROJECTS_REGISTRY.get("nooreldean-super-app") or {}
     mcp_srv = target_info.get("mcp_server", "")
     return load_supabase_token_from_mcp(mcp_srv) or os.environ.get("SUPABASE_ACCESS_TOKEN", "")
 
@@ -102,9 +102,9 @@ def execute_supabase_sql(project_slug, sql_query):
             target_info = v
             break
     if not target_info:
-        target_info = SUPABASE_PROJECTS_REGISTRY.get("nooreldean-super-app")
+        target_info = SUPABASE_PROJECTS_REGISTRY.get("nooreldean-super-app") or {}
 
-    ref = target_info["ref"]
+    ref = target_info.get("ref", "")
     token = get_project_supabase_token(project_slug)
     url = f"https://api.supabase.com/v1/projects/{ref}/database/query"
     headers = {
@@ -196,7 +196,7 @@ def resolve_project_path(project_slug):
                 return cand
 
     # Default to current workspace if nothing matches
-    return _CONFIG.get("current_workspace")
+    return _CONFIG.get("current_workspace") or os.getcwd()
 
 def run_project_checks(project_path):
     """Run local project tests or static analysis to ensure safety before opening PR."""
@@ -335,6 +335,7 @@ def process_single_incident(incident, chat_id):
         
         # 6. Execute Tri-Phase Multi-Model Orchestration (Opus -> Flash -> Opus Review)
         agy_bin = _CONFIG.get("agy_bin", "agy")
+        agy_proc = None
         fix_summary = "تم التحليل المعماري بـ Claude Opus، والتنفيذ بـ Gemini Flash، والاعتماد النهائي بـ Claude Opus."
         try:
             import tri_phase_engine
@@ -351,7 +352,7 @@ def process_single_incident(incident, chat_id):
             fix_summary = tri_res.get("review_summary") or fix_summary
         except Exception as e:
             logger.error(f"[SRE] Tri-Phase error, falling back to direct: {e}")
-            subprocess.run([agy_bin, repair_prompt], cwd=project_path, capture_output=True, text=True, timeout=360)
+            agy_proc = subprocess.run([agy_bin, repair_prompt], cwd=project_path, capture_output=True, text=True, timeout=360)
         
         # 7. Check if git diff exists
         diff_proc = subprocess.run(["git", "status", "--porcelain"], cwd=project_path, capture_output=True, text=True)
@@ -441,7 +442,7 @@ def process_single_incident(incident, chat_id):
                 pr_num = data.get("number")
                 
         # 11. Extract fix summary from agy output or generate one
-        if "agy_proc" in locals() and getattr(agy_proc, "stdout", None):
+        if agy_proc and getattr(agy_proc, "stdout", None):
             paras = [p.strip() for p in agy_proc.stdout.split("\n\n") if p.strip()]
             if paras:
                 fix_summary = paras[-1][:500]
@@ -939,7 +940,7 @@ def handle_sre_callback(cb_data, chat_id, message_id, user_id):
                 # scan stderr for trycloudflare
                 import re
                 start_t = time.time()
-                while time.time() - start_t < 15:
+                while time.time() - start_t < 15 and p.stderr:
                     line = p.stderr.readline()
                     if not line:
                         break
