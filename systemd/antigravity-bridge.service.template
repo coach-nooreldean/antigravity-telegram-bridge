@@ -1,0 +1,14 @@
+[Unit]
+Description=Antigravity Telegram Bot Remote Controller
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/antigravity-telegram-bridge
+ExecStart=/usr/bin/python3 %h/antigravity-telegram-bridge/bot.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

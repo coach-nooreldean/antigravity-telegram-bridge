@@ -1,0 +1,29 @@
+# Configuration & secrets
+config.json
+.env
+*.token
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Media & Temp files
+media/
+*.ogg
+*.wav
+*.jpg
+*.png
+.scratch/
+
+# OS artifacts
+.DS_Store
+Thumbs.db

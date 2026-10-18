@@ -1,0 +1,10 @@
+{
+  "bot_token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
+  "allowed_user_id": null,
+  "language": "en",
+  "workspace_mode": "auto",
+  "current_workspace": "~/projects/my-app",
+  "current_model": "default",
+  "current_effort": "default",
+  "agy_bin": "agy"
+}
