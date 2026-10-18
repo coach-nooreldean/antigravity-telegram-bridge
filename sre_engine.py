@@ -29,8 +29,8 @@ _ACTIVE_REFINE_SESSIONS = {}  # chat_id -> {incident_id, branch, project_path}
 _WORKER_THREAD = None
 _RUNNING = True
 
-DEFAULT_SUPABASE_URL = "https://gjvjkcjvkbfdnxycnfyy.supabase.co"
-DEFAULT_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdqdmprY2p2a2JmZG54eWNuZnl5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg5NDQ1NDEsImV4cCI6MjA5NDUyMDU0MX0.2vm2pKpRhyslSkyODAZ2S1zzp1mbx03sKb7jDK-lcbo"
+DEFAULT_SUPABASE_URL = "https://ctzdbltuamcbctxwzlly.supabase.co"
+DEFAULT_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN0emRibHR1YW1jYmN0eHd6bGx5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI2ODQ2NTQsImV4cCI6MjA4ODI2MDY1NH0.uRuEpIQUg4NF0eEprX9Lbfj8pAoI1qdYwo_Z8OjMPmA"
 
 DEFAULT_PROJECTS_MAP = {
     "nooreldean-super-app": "/mnt/data2/documents/githup/NOORELDEAN COACHING/nooreldean-super-app",
@@ -236,17 +236,25 @@ def process_single_incident(incident, chat_id):
             f"4. Provide a clear 2-3 sentence Arabic summary of the exact cause and the solution implemented."
         )
         
-        # 6. Execute agy directly in the project directory
+        # 6. Execute Tri-Phase Multi-Model Orchestration (Opus -> Flash -> Opus Review)
         agy_bin = _CONFIG.get("agy_bin", "agy")
-        cmd = [agy_bin, repair_prompt]
-        
-        agy_proc = subprocess.run(
-            cmd,
-            cwd=project_path,
-            capture_output=True,
-            text=True,
-            timeout=360  # 6 minutes max
-        )
+        fix_summary = "تم التحليل المعماري بـ Claude Opus، والتنفيذ بـ Gemini Flash، والاعتماد النهائي بـ Claude Opus."
+        try:
+            import tri_phase_engine
+            tri_res = tri_phase_engine.run_tri_phase_pipeline(
+                task_title=f"{source.upper()} Incident: {issue_title}",
+                requirement_prompt=repair_prompt,
+                workspace=project_path,
+                chat_id=chat_id,
+                send_message_func=_SEND_MESSAGE,
+                edit_message_text_func=_EDIT_MESSAGE,
+                agy_bin=agy_bin,
+                is_sre=True
+            )
+            fix_summary = tri_res.get("review_summary") or fix_summary
+        except Exception as e:
+            logger.error(f"[SRE] Tri-Phase error, falling back to direct: {e}")
+            subprocess.run([agy_bin, repair_prompt], cwd=project_path, capture_output=True, text=True, timeout=360)
         
         # 7. Check if git diff exists
         diff_proc = subprocess.run(["git", "status", "--porcelain"], cwd=project_path, capture_output=True, text=True)

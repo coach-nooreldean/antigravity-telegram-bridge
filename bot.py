@@ -2453,20 +2453,37 @@ def handle_command(chat_id, user_id, text):
             send_message(chat_id, msg)
             return
         
-        goal_prompt = (
-            f"You are running in autonomous /goal mode. "
-            f"Be extra thorough, break down the problem, execute end-to-end, test and verify every step, "
-            f"do not stop until this goal is fully achieved and working without errors: {arg}"
-        )
-        threading.Thread(
-            target=run_agent_task,
-            args=(chat_id, goal_prompt),
-            kwargs={
-                "extra_args": ["--effort", "high"],
-                "banner_title": "🎯 <b>وضع الهدف المستقل (Goal Mode - High Effort)</b>"
-            },
-            daemon=True
-        ).start()
+        def run_tri_goal():
+            ws, _ = get_effective_workspace()
+            try:
+                import tri_phase_engine
+                res = tri_phase_engine.run_tri_phase_pipeline(
+                    task_title=arg,
+                    requirement_prompt=arg,
+                    workspace=ws,
+                    chat_id=chat_id,
+                    send_message_func=send_message,
+                    edit_message_text_func=edit_message_text,
+                    agy_bin=CONFIG.get("agy_bin", "agy"),
+                    is_sre=False
+                )
+                summary = res.get("review_summary") or "تم إنجاز الهدف واعتماده بنجاح."
+                msg_out = (
+                    "🎉 <b>اكتمل الهدف بنجاح عبر خط الإنتاج الثلاثي!</b>\n\n"
+                    f"📋 <b>الهدف:</b> <code>{escape_html(arg)}</code>\n\n"
+                    "🛡️ <b>تقرير الاعتماد النهائي (Claude Opus Thinking):</b>\n"
+                    f"<i>{escape_html(summary)}</i>"
+                )
+                send_message(chat_id, msg_out)
+            except Exception as e:
+                goal_prompt = (
+                    f"You are running in autonomous /goal mode. "
+                    f"Be extra thorough, break down the problem, execute end-to-end, test and verify every step, "
+                    f"do not stop until this goal is fully achieved and working without errors: {arg}"
+                )
+                run_agent_task(chat_id, goal_prompt, banner_title="🎯 <b>وضع الهدف المستقل (Goal Mode)</b>", extra_args=["--effort", "high"])
+
+        threading.Thread(target=run_tri_goal, daemon=True).start()
 
     elif cmd in ["/grill-me", "/grill_me", "/grill"]:
         topic = arg.strip() if arg.strip() else "استجوبني واختبرني في ما هي أفضل الإضافات والتحسينات المعمارية والتطويرية لهذا المشروع؟"
