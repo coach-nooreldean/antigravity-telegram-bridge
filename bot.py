@@ -3988,7 +3988,7 @@ def main():
                                 terminal_hud.set_hud_enabled(True)
                                 terminal_hud.ensure_kitty_process()
                                 try:
-                                    subprocess.run("hyprctl dispatch focuswindow class:agy-hud 2>/dev/null", shell=True)
+                                    subprocess.run(["hyprctl", "eval", "return hl.dispatch(hl.dsp.focus({ window = 'class:agy-hud' }))"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                                 except Exception:
                                     pass
                             answer_callback_query(cb_id, "تم فتح شاشة الـ HUD على شاشة الكمبيوتر 🖥️")

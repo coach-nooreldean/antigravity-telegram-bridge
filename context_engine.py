@@ -154,6 +154,11 @@ def format_live_context_badge(conv_id: Optional[str] = None) -> str:
     st = get_context_status(conv_id)
     return f"🧠 <b>الذاكرة:</b> [ <code>{st['steps']}/{st['max_steps']}</code> ] {st['progress_bar']} ({st['percentage']}%)"
 
+def get_conversation_step_count(conv_id: Optional[str] = None) -> int:
+    """Returns total step count for the given conversation or active one."""
+    st = get_context_status(conv_id)
+    return st.get("steps", 0)
+
 def extract_message_keypoints(text: str, max_points: int = 4) -> list:
     """Extracts concise meaningful bullet points from a prompt or response."""
     if not text:
