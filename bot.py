@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-Antigravity Telegram Bridge (Full Powerhouse Edition)
-Open-source remote controller and mobile interface for Google Antigravity Agent.
-Author: Nooreldean (https://github.com/coach-nooreldean)
-License: MIT
+Antigravity Telegram Bridge
+Allows controlling Antigravity Agent and coding projects remotely via Telegram.
 """
 
 import base64
@@ -22,6 +20,11 @@ import threading
 import urllib.parse
 import requests
 
+try:
+    import sre_engine
+except ImportError:
+    sre_engine = None
+
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 def load_config():
@@ -32,10 +35,10 @@ def load_config():
         "bot_token": "",
         "allowed_user_id": None,
         "workspace_mode": "auto",
-        "current_workspace": os.getcwd(),
+        "current_workspace": "/mnt/data2/documents/githup/nooreldean-life-os",
         "current_model": "default",
         "current_effort": "default",
-        "agy_bin": shutil.which("agy") or os.path.expanduser("~/.local/bin/agy") or "agy"
+        "agy_bin": "/home/nooreldean/.local/bin/agy"
     }
 
 def save_config(cfg):
@@ -175,15 +178,13 @@ def send_photo(chat_id, photo_path, caption=None):
 
 def take_desktop_screenshot(dest_path):
     env = os.environ.copy()
-    env["XDG_RUNTIME_DIR"] = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    env["XDG_RUNTIME_DIR"] = "/run/user/1000"
     if "WAYLAND_DISPLAY" not in env:
         try:
-            runtime_dir = env.get("XDG_RUNTIME_DIR", "")
-            if os.path.isdir(runtime_dir):
-                for f in os.listdir(runtime_dir):
-                    if f.startswith("wayland-"):
-                        env["WAYLAND_DISPLAY"] = f
-                        break
+            for f in os.listdir("/run/user/1000"):
+                if f.startswith("wayland-"):
+                    env["WAYLAND_DISPLAY"] = f
+                    break
         except Exception:
             pass
     if "WAYLAND_DISPLAY" not in env:
@@ -194,7 +195,7 @@ def take_desktop_screenshot(dest_path):
     return res.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 0
 
 def take_web_snapshot(url, dest_path):
-    chrome_bin = shutil.which("google-chrome") or shutil.which("chromium") or os.path.expanduser("~/.local/bin/google-chrome")
+    chrome_bin = "/home/nooreldean/.local/bin/google-chrome"
     if not os.path.isfile(chrome_bin):
         chrome_bin = shutil.which("google-chrome") or shutil.which("chromium")
     if not chrome_bin:
@@ -478,7 +479,7 @@ def start_cloudflare_tunnel(port):
             except Exception as e:
                 print(f"[Error] Failed to start http.server on {port}: {e}")
 
-        cloudflared_bin = shutil.which("cloudflared") or os.path.expanduser("~/.local/bin/cloudflared")
+        cloudflared_bin = "/home/nooreldean/.local/bin/cloudflared"
         log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "cloudflared.log")
@@ -1255,7 +1256,8 @@ def sync_telegram_commands():
             ("undo", "↩️ تراجع فوري عن تعديلات الكود"),
             ("briefing", "🌅 تقرير صباحي شامل لليوم والمشاريع"),
             ("sh", "⚡ تنفيذ أمر شل/ترمينال مباشر"),
-            ("sentry", "🛡️ فحص كراشات وأخطاء Sentry في التطبيقات"),
+            ("sentry", "🛡️ لوحة أخطاء ومشاكل Sentry"),
+            ("incidents", "🚨 سجل الإصلاح التلقائي للأعطال SRE"),
             ("servers", "🌐 فحص السيرفرات والخدمات المفتوحة (Ports)"),
             ("diff", "📝 ملخص التغييرات في الكود غير المحفوظة"),
             ("tasks", "⚡ مراقبة العمليات واستهلاك المعالج والرام"),
@@ -1323,12 +1325,12 @@ def get_effective_workspace():
         ide_ws = get_active_ide_workspace()
         if ide_ws:
             return ide_ws, "🔄 تتبع تلقائي للـ IDE"
-    manual_ws = CONFIG.get("current_workspace", os.getcwd())
+    manual_ws = CONFIG.get("current_workspace", "/mnt/data2/documents/githup/nooreldean-life-os")
     return manual_ws, "📌 مجلد مثبت يدوياً"
 
 def discover_all_projects():
-    """Scans configured projects_root or parent directory up to depth 3 for git repositories."""
-    base_dir = CONFIG.get("projects_root") or os.path.dirname(os.getcwd()) or os.path.expanduser("~/projects")
+    """Scans /mnt/data2/documents/githup up to depth 3 for git repositories."""
+    base_dir = "/mnt/data2/documents/githup"
     projects = []
     if not os.path.exists(base_dir):
         return projects
@@ -1518,7 +1520,7 @@ def send_projects_menu(chat_id):
     current_ws, mode_desc = get_effective_workspace()
     
     if not projects:
-        send_message(chat_id, f"❌ لم يتم العثور على أي مشاريع في <code>{escape_html(base_dir)}</code>\nيمكنك تحديد مسار المشاريع عبر <code>/cd [المسار]</code>")
+        send_message(chat_id, "❌ لم يتم العثور على أي مشاريع في <code>/mnt/data2/documents/githup</code>")
         return
 
     curr_bname = os.path.basename(current_ws)
@@ -1560,7 +1562,7 @@ def send_projects_menu(chat_id):
 def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_title=None):
     global current_task_info
     workspace, mode_desc = get_effective_workspace()
-    agy_bin = CONFIG.get("agy_bin", shutil.which("agy") or os.path.expanduser("~/.local/bin/agy") or "agy")
+    agy_bin = CONFIG.get("agy_bin", "/home/nooreldean/.local/bin/agy")
     
     with active_task_lock:
         if current_task_info["running"]:
@@ -2244,7 +2246,7 @@ def handle_command(chat_id, user_id, text):
     hyphen_skill = raw_cmd.replace("_", "-")
     core_commands = [
         "start", "help", "model", "effort", "goal", "grill_me", "grill-me", "grill",
-        "plan", "skills", "agent", "auto", "status", "where", "servers", "sentry",
+        "plan", "skills", "agent", "auto", "status", "where", "servers", "sentry", "incidents", "sre",
         "commit", "push", "cd", "projects", "git", "deploy", "stop",
         "diff", "restart", "logs", "log", "errors", "export", "transcript", "dump", "tasks", "top", "ps", "jobs",
         "pr", "pullrequest", "menu", "hidemenu"
@@ -3090,9 +3092,34 @@ def handle_command(chat_id, user_id, text):
             btns.append([{"text": "🔄 تحديث الخوادم", "callback_data": "act:refresh_servers"}, {"text": "🛑 إغلاق النفق النشط", "callback_data": "act:tunnel_stop"}])
             send_message(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": btns})
 
+    elif cmd in ["/incidents", "/sre"]:
+        if sre_engine:
+            headers = sre_engine.get_supabase_headers()
+            url = f"{sre_engine.get_supabase_url()}/rest/v1/incident_queue?order=created_at.desc&limit=5"
+            try:
+                res = requests.get(url, headers=headers, timeout=10)
+                rows = res.json() if res.status_code == 200 else []
+                if not rows:
+                    send_message(chat_id, "✅ <b>لا توجد أي أعطال أو حوادث مسجلة حالياً!</b> النظام سليم ومستقر 100%.")
+                else:
+                    lines = ["📋 <b>سجل الأعطال وحالات الإصلاح التلقائي (Autonomous SRE):</b>\n"]
+                    for r in rows:
+                        st_icon = "⏳" if r["status"] == "pending" else "🛠️" if r["status"] == "in_progress" else "🌿" if r["status"] == "pr_opened" else "✅" if r["status"] == "merged" else "⚠️"
+                        lines.append(f"{st_icon} <b>{r['source'].upper()}</b> | <code>{escape_html(r['project_slug'])}</code>")
+                        lines.append(f"💥 {escape_html(r['issue_title'][:60])}")
+                        lines.append(f"الحالة: <code>{r['status']}</code>")
+                        if r.get("pr_url"):
+                            lines.append(f"🔗 <a href='{r['pr_url']}'>عرض الـ Pull Request</a>")
+                        lines.append("")
+                    send_message(chat_id, "\n".join(lines))
+            except Exception as e:
+                send_message(chat_id, f"❌ تعذر استعلام الأعطال: {e}")
+        else:
+            send_message(chat_id, "⚠️ محرك SRE غير متصل حالياً.")
+
     elif cmd == "/sentry":
         ws, _ = get_effective_workspace()
-        sentry_url = CONFIG.get("sentry_url", "")
+        sentry_url = "https://nooreldean-coaching.sentry.io/issues/?project=4511983519858688"
         
         recent_errors = []
         try:
@@ -3110,17 +3137,19 @@ def handle_command(chat_id, user_id, text):
         if recent_errors:
             err_preview = "\n\n⚠️ <b>آخر سجلات وتنبيهات مسجلة:</b>\n<pre>" + escape_html("\n".join(recent_errors[-3:])) + "</pre>"
         
-        kb_rows = []
-        if sentry_url:
-            kb_rows.append([{"text": "🛡️ فتح لوحة أخطاء Sentry Dashboard", "url": sentry_url}])
-        kb_rows.append([{"text": "🧪 فحص سلامة كود المشروع (Build/Analyze)", "callback_data": "act:build"}])
-        kb_rows.append([{"text": "🔄 استعلام الأيجنت عن مشاكل الكراش الأخيرة", "callback_data": "act:ask_agent_sentry"}])
-        keyboard = {"inline_keyboard": kb_rows}
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🛡️ فتح لوحة أخطاء Sentry Dashboard", "url": sentry_url}],
+                [{"text": "🧪 فحص سلامة كود المشروع (Build/Analyze)", "callback_data": "act:build"}],
+                [{"text": "🔄 استعلام الأيجنت عن مشاكل الكراش الأخيرة", "callback_data": "act:ask_agent_sentry"}]
+            ]
+        }
         send_message(
             chat_id,
             f"🛡️ <b>لوحة فحص الأخطاء والكراشات (Sentry Diagnostics):</b>\n\n"
             f"📁 <b>المشروع الحالي:</b> <code>{escape_html(os.path.basename(ws))}</code>\n"
-            f"🔗 <b>اللوحة:</b> <code>{escape_html(sentry_url or 'Not Configured (add sentry_url to config.json)')}</code>\n"
+            f"🔗 <b>اللوحة:</b> <code>nooreldean-coaching.sentry.io</code>\n"
+            f"📊 <b>المشروع المرتبط:</b> <code>nooreldean-super-app (Flutter & Web)</code>"
             f"{err_preview}\n\n"
             f"<i>اضغط على الزر أدناه لفتح لوحة تحكم Sentry المباشرة أو لفحص التطبيق.</i>",
             reply_markup=keyboard
@@ -3137,6 +3166,8 @@ def main():
     print("[+] Starting Antigravity Telegram Bot...")
     sync_telegram_commands()
     start_media_cleanup_daemon()
+    if sre_engine:
+        sre_engine.init_sre_engine(CONFIG, send_message, edit_message_text, answer_callback_query, run_agent_task)
     offset = None
     
     # Send online notification if user id already exists
@@ -3173,6 +3204,10 @@ def main():
                     if user_id != CONFIG.get("allowed_user_id"):
                         answer_callback_query(cb_id, "⛔ غير مصرح لك")
                         continue
+
+                    if cb_data.startswith("sre_"):
+                        if sre_engine and sre_engine.handle_sre_callback(cb_data, chat_id, cb.get("message", {}).get("message_id"), user_id):
+                            continue
 
                     if cb_data.startswith("model:"):
                         chosen = cb_data.split(":", 1)[1]
@@ -3792,6 +3827,9 @@ def main():
                     continue
 
                 if "text" in msg:
+                    text_content = msg["text"].strip()
+                    if sre_engine and sre_engine.check_and_handle_refine_input(chat_id, text_content):
+                        continue
                     threading.Thread(target=handle_command, args=(chat_id, user_id, msg["text"]), daemon=True).start()
 
         except requests.exceptions.RequestException:
