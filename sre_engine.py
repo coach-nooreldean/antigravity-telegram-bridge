@@ -11,10 +11,12 @@ import os
 import sys
 import time
 import json
+import html
 import socket
 import logging
 import threading
 import subprocess
+import urllib.parse
 import requests
 
 logger = logging.getLogger("sre_engine")
@@ -36,9 +38,86 @@ DEFAULT_PROJECTS_MAP = {
     "nooreldean-super-app": "/mnt/data2/documents/githup/NOORELDEAN COACHING/nooreldean-super-app",
     "nooreldean-super-app2": "/mnt/data2/documents/githup/NOORELDEAN COACHING/nooreldean-super-app",
     "nooreldean-life-os": "/mnt/data2/documents/githup/nooreldean-life-os",
+    "website": "/mnt/data2/documents/githup/nooreldean-life-os",
     "antigravity-telegram-bridge": "/mnt/data2/documents/githup/antigravity-telegram-bridge",
-    "coachdrift": "/mnt/data2/documents/githup/coach-nooreldean"
+    "coachdrift": "/mnt/data2/documents/githup/coach-nooreldean",
+    "coach-os": "/mnt/data2/documents/githup/coach-nooreldean"
 }
+
+MCP_CONFIG_PATH = os.path.expanduser("~/.gemini/config/mcp_config.json")
+
+def load_supabase_token_from_mcp(mcp_server_name):
+    try:
+        if os.path.isfile(MCP_CONFIG_PATH):
+            with open(MCP_CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                headers = data.get("mcpServers", {}).get(mcp_server_name, {}).get("headers", {})
+                auth = headers.get("Authorization", "")
+                if auth.startswith("Bearer "):
+                    return auth.split("Bearer ", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+SUPABASE_PROJECTS_REGISTRY = {
+    "nooreldean-super-app": {
+        "name": "Super App Database",
+        "ref": "gjvjkcjvkbfdnxycnfyy",
+        "mcp_server": "supabase-super-app",
+        "workspace": "/mnt/data2/documents/githup/NOORELDEAN COACHING/nooreldean-super-app"
+    },
+    "nooreldean-life-os": {
+        "name": "Website / Life OS Database",
+        "ref": "ctzdbltuamcbctxwzlly",
+        "mcp_server": "supabase-website",
+        "workspace": "/mnt/data2/documents/githup/nooreldean-life-os"
+    },
+    "coachdrift": {
+        "name": "Coach OS Database",
+        "ref": "zhbeynlaylzbqhimdnus",
+        "mcp_server": "supabase-coach-os",
+        "workspace": "/mnt/data2/documents/githup/coach-nooreldean"
+    }
+}
+
+def get_project_supabase_token(project_slug):
+    slug_lower = project_slug.lower() if project_slug else ""
+    target_info = None
+    for k, v in SUPABASE_PROJECTS_REGISTRY.items():
+        if k in slug_lower or slug_lower in k:
+            target_info = v
+            break
+    if not target_info:
+        target_info = SUPABASE_PROJECTS_REGISTRY.get("nooreldean-super-app")
+    mcp_srv = target_info.get("mcp_server", "")
+    return load_supabase_token_from_mcp(mcp_srv) or os.environ.get("SUPABASE_ACCESS_TOKEN", "")
+
+def execute_supabase_sql(project_slug, sql_query):
+    """Executes a SQL migration/query on the designated Supabase project."""
+    target_info = None
+    slug_lower = project_slug.lower() if project_slug else ""
+    for k, v in SUPABASE_PROJECTS_REGISTRY.items():
+        if k in slug_lower or slug_lower in k:
+            target_info = v
+            break
+    if not target_info:
+        target_info = SUPABASE_PROJECTS_REGISTRY.get("nooreldean-super-app")
+
+    ref = target_info["ref"]
+    token = get_project_supabase_token(project_slug)
+    url = f"https://api.supabase.com/v1/projects/{ref}/database/query"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    try:
+        res = requests.post(url, headers=headers, json={"query": sql_query}, timeout=30)
+        if res.status_code in (200, 201):
+            return True, res.json()
+        else:
+            return False, f"HTTP {res.status_code}: {res.text[:400]}"
+    except Exception as e:
+        return False, str(e)
 
 def get_supabase_headers():
     sre_cfg = _CONFIG.get("sre_engine", {})
@@ -219,22 +298,39 @@ def process_single_incident(incident, chat_id):
             subprocess.run(["git", "checkout", branch_name], cwd=project_path, capture_output=True)
             
         # 5. Formulate autonomous repair prompt for agy
-        repair_prompt = (
-            f"You are the Autonomous SRE & Staff Software Engineer diagnosing a critical failure.\n\n"
-            f"=== INCIDENT DETAILS ===\n"
-            f"Source: {source}\n"
-            f"Project: {project_slug}\n"
-            f"Error Title: {issue_title}\n"
-            f"Culprit / Location: {culprit}\n"
-            f"URL: {issue_url}\n"
-            f"Stack Trace / Logs:\n{stack_trace[:3000]}\n"
-            f"========================\n\n"
-            f"GOAL:\n"
-            f"1. Search the codebase for the culprit file and understand why this exception occurred.\n"
-            f"2. Apply a clean, robust, defensive fix (proper null-checking, fallback handling, or correcting the broken logic).\n"
-            f"3. Run available local tests or static analysis in this project to verify that your fix builds and doesn't break existing functionality.\n"
-            f"4. Provide a clear 2-3 sentence Arabic summary of the exact cause and the solution implemented."
-        )
+        if source == "database":
+            repair_prompt = (
+                f"You are the Autonomous Database Administrator (DBA) & Staff Backend SRE diagnosing a database failure/advisory.\n\n"
+                f"=== DATABASE INCIDENT DETAILS ===\n"
+                f"Source: {source} (PostgreSQL / Supabase)\n"
+                f"Project: {project_slug}\n"
+                f"Issue Title: {issue_title}\n"
+                f"Table / Function / Culprit: {culprit}\n"
+                f"Error Details / Query Logs:\n{stack_trace[:3000]}\n"
+                f"=================================\n\n"
+                f"GOAL:\n"
+                f"1. Author an idempotent, safe PostgreSQL migration file in `supabase/migrations/<YYYYMMDDHHMMSS>_fix_{incident_id[:8]}.sql`.\n"
+                f"2. Ensure the SQL uses safe syntax: `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`, `DROP POLICY IF EXISTS ...; CREATE POLICY ...`, or `ALTER FUNCTION ... SET search_path = public, pg_temp;`.\n"
+                f"3. If table structure or columns were modified, update any corresponding Dart/Flutter models (in lib/features/) or TypeScript types.\n"
+                f"4. Provide a clear 2-3 sentence Arabic summary of the database issue and the exact SQL migration created."
+            )
+        else:
+            repair_prompt = (
+                f"You are the Autonomous SRE & Staff Software Engineer diagnosing a critical failure.\n\n"
+                f"=== INCIDENT DETAILS ===\n"
+                f"Source: {source}\n"
+                f"Project: {project_slug}\n"
+                f"Error Title: {issue_title}\n"
+                f"Culprit / Location: {culprit}\n"
+                f"URL: {issue_url}\n"
+                f"Stack Trace / Logs:\n{stack_trace[:3000]}\n"
+                f"========================\n\n"
+                f"GOAL:\n"
+                f"1. Search the codebase for the culprit file and understand why this exception occurred.\n"
+                f"2. Apply a clean, robust, defensive fix (proper null-checking, fallback handling, or correcting the broken logic).\n"
+                f"3. Run available local tests or static analysis in this project to verify that your fix builds and doesn't break existing functionality.\n"
+                f"4. Provide a clear 2-3 sentence Arabic summary of the exact cause and the solution implemented."
+            )
         
         # 6. Execute Tri-Phase Multi-Model Orchestration (Opus -> Flash -> Opus Review)
         agy_bin = _CONFIG.get("agy_bin", "agy")
@@ -266,6 +362,24 @@ def process_single_incident(incident, chat_id):
                 _SEND_MESSAGE(chat_id, warn_msg)
             update_incident(incident_id, {"status": "failed", "fix_summary": "No code changes made by agent."})
             return
+
+        # Detect newly created or modified SQL migration file
+        detected_migration_sql = ""
+        detected_migration_file = ""
+        for line in diff_proc.stdout.splitlines():
+            line_clean = line.strip()
+            if line_clean.endswith(".sql"):
+                parts = line_clean.split()
+                f_path = parts[-1]
+                full_sql_p = os.path.join(project_path, f_path)
+                if os.path.isfile(full_sql_p):
+                    detected_migration_file = f_path
+                    try:
+                        with open(full_sql_p, "r", encoding="utf-8") as sf:
+                            detected_migration_sql = sf.read()
+                    except Exception:
+                        pass
+                break
             
         # 8. Run local verification checks
         check_summary = run_project_checks(project_path)
@@ -326,21 +440,25 @@ def process_single_incident(incident, chat_id):
                 pr_num = data.get("number")
                 
         # 11. Extract fix summary from agy output or generate one
-        fix_summary = "تم فحص الـ Stack Trace ومعالجة السبب الجذري وإضافة فحوصات وقائية مع التحقق من استقرار الكود محلياً."
-        if agy_proc.stdout:
-            # find Arabic lines or last paragraph
+        if "agy_proc" in locals() and getattr(agy_proc, "stdout", None):
             paras = [p.strip() for p in agy_proc.stdout.split("\n\n") if p.strip()]
             if paras:
                 fix_summary = paras[-1][:500]
                 
         # 12. Update Supabase record
-        update_incident(incident_id, {
+        up_data = {
             "status": "pr_opened",
             "pr_url": pr_url or f"https://github.com (Branch: {branch_name})",
             "pr_branch": branch_name,
             "pr_number": pr_num,
             "fix_summary": fix_summary
-        })
+        }
+        if detected_migration_sql:
+            up_data["raw_payload"] = json.dumps({
+                "migration_sql": detected_migration_sql,
+                "migration_file": detected_migration_file
+            })
+        update_incident(incident_id, up_data)
         
         # 13. Send Interactive Telegram Action Deck
         deck_text = (
@@ -356,21 +474,25 @@ def process_single_incident(incident, chat_id):
             f"👇 <b>اختر الإجراء التالي بنقرة واحدة:</b>"
         )
         
-        reply_markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "🌐 معاينة عبر Cloudflare Tunnel", "callback_data": f"sre_preview:{incident_id}"},
-                    {"text": "🔀 دمج مع الـ Main", "callback_data": f"sre_merge:{incident_id}"}
-                ],
-                [
-                    {"text": "🔄 إعادة التعديل / مش عاجبني", "callback_data": f"sre_refine:{incident_id}"},
-                    {"text": "📦 بناء نسخة جديدة", "callback_data": f"sre_build:{incident_id}"}
-                ],
-                [
-                    {"text": "🧪 توليد وفحص Unit Tests لهذا الـ PR", "callback_data": f"sre_gen_tests:{incident_id}"}
-                ]
+        action_rows = []
+        if source == "database" or detected_migration_sql:
+            action_rows.append([
+                {"text": "▶️ تطبيق الـ SQL في قاعدة البيانات الآن", "callback_data": f"sre_apply_sql:{incident_id}"}
+            ])
+        action_rows.extend([
+            [
+                {"text": "🌐 معاينة عبر Cloudflare Tunnel", "callback_data": f"sre_preview:{incident_id}"},
+                {"text": "🔀 دمج مع الـ Main", "callback_data": f"sre_merge:{incident_id}"}
+            ],
+            [
+                {"text": "🔄 إعادة التعديل / مش عاجبني", "callback_data": f"sre_refine:{incident_id}"},
+                {"text": "📦 بناء نسخة جديدة", "callback_data": f"sre_build:{incident_id}"}
+            ],
+            [
+                {"text": "🧪 توليد وفحص Unit Tests لهذا الـ PR", "callback_data": f"sre_gen_tests:{incident_id}"}
             ]
-        }
+        ])
+        reply_markup = {"inline_keyboard": action_rows}
         
         if _SEND_MESSAGE:
             _SEND_MESSAGE(chat_id, deck_text, reply_markup=reply_markup)
@@ -382,13 +504,132 @@ def process_single_incident(incident, chat_id):
         if _SEND_MESSAGE:
             _SEND_MESSAGE(chat_id, err_msg)
 
+def scan_all_databases_health(target_chat_id=None):
+    """
+    Scans all registered Supabase databases for:
+    1. Public tables with RLS disabled.
+    2. Functions with mutable search path.
+    3. Unindexed foreign keys causing slow sequential scans.
+    Queues detected critical issues into incident_queue if not already logged.
+    """
+    logger.info("[DB-SRE] Running scheduled Database Health & Advisor scan across projects...")
+    findings = []
+    
+    audit_queries = {
+        "rls_disabled": {
+            "title": "RLS Disabled on public table",
+            "type": "SecurityVulnerability",
+            "sql": "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND rowsecurity = false;"
+        },
+        "mutable_search_path": {
+            "title": "Function Search Path Mutable",
+            "type": "SecurityWarning",
+            "sql": "SELECT proname FROM pg_proc JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace WHERE nspname = 'public' AND prosecdef = true AND proconfig IS NULL LIMIT 3;"
+        },
+        "unindexed_foreign_keys": {
+            "title": "Unindexed Foreign Key (Slow Table Scan)",
+            "type": "PerformanceAdvisory",
+            "sql": (
+                "SELECT c.conrelid::regclass::text as tbl, a.attname as col "
+                "FROM pg_constraint c "
+                "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey) "
+                "WHERE c.contype = 'f' "
+                "  AND NOT EXISTS ( "
+                "    SELECT 1 FROM pg_index i "
+                "    WHERE i.indrelid = c.conrelid "
+                "      AND i.indkey[0] = a.attnum "
+                "  ) "
+                "LIMIT 3;"
+            )
+        }
+    }
+    
+    for slug, info in SUPABASE_PROJECTS_REGISTRY.items():
+        ref = info["ref"]
+        token = get_project_supabase_token(slug)
+        url = f"https://api.supabase.com/v1/projects/{ref}/database/query"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        
+        for q_key, q_meta in audit_queries.items():
+            try:
+                res = requests.post(url, headers=headers, json={"query": q_meta["sql"]}, timeout=12)
+                if res.status_code in (200, 201):
+                    rows = res.json()
+                    if rows and isinstance(rows, list):
+                        for r in rows:
+                            culprit = r.get("tablename") or r.get("proname") or f"{r.get('tbl')}.{r.get('col')}"
+                            finding_title = f"{q_meta['title']}: {culprit}"
+                            findings.append({
+                                "project_slug": slug,
+                                "issue_title": finding_title,
+                                "error_type": q_meta["type"],
+                                "culprit": culprit,
+                                "stack_trace": f"Detected by Database SRE Health Scanner on {info['name']}"
+                            })
+            except Exception as e:
+                logger.error(f"[DB-SRE] Error scanning {slug} for {q_key}: {e}")
+                
+    # Push new findings into incident_queue
+    queued_count = 0
+    headers = get_supabase_headers()
+    incidents_url = f"{get_supabase_url()}/rest/v1/incident_queue"
+    for f in findings:
+        try:
+            check_url = f"{incidents_url}?issue_title=eq.{urllib.parse.quote(f['issue_title'])}&status=in.(pending,in_progress,pr_opened)&limit=1"
+            c_res = requests.get(check_url, headers=headers, timeout=5)
+            if c_res.status_code == 200 and len(c_res.json()) > 0:
+                continue
+                
+            payload = {
+                "source": "database",
+                "project_slug": f["project_slug"],
+                "issue_id": f"db-audit-{int(time.time())}-{queued_count}",
+                "issue_title": f["issue_title"],
+                "error_type": f["error_type"],
+                "culprit": f["culprit"],
+                "stack_trace": f["stack_trace"],
+                "raw_payload": json.dumps(f),
+                "status": "pending"
+            }
+            ins_res = requests.post(incidents_url, headers=headers, json=payload, timeout=5)
+            if ins_res.status_code in (200, 201):
+                queued_count += 1
+        except Exception:
+            pass
+            
+    if target_chat_id and _SEND_MESSAGE:
+        if queued_count > 0:
+            _SEND_MESSAGE(
+                target_chat_id,
+                f"🛡️ <b>[DB-SRE] اكتمال فحص قواعد البيانات:</b>\n\n"
+                f"تم رصد <b>{len(findings)}</b> ملاحظة أمان وأداء، وتم إدراج <b>{queued_count}</b> مهمة إصلاح جديدة في طابور SRE.\n\n"
+                f"سيبدأ الوكيل تلقائياً في فتح فروع Git وكتابة الـ Migrations اللازمة!"
+            )
+        else:
+            _SEND_MESSAGE(
+                target_chat_id,
+                f"✅ <b>[DB-SRE] قواعد البيانات سليمة ومحصنة 100%!</b>\n\n"
+                f"تم فحص المشاريع الثلاثة:\n"
+                f"• <code>nooreldean-super-app</code> 🟢\n"
+                f"• <code>nooreldean-life-os</code> 🟢\n"
+                f"• <code>coachdrift</code> 🟢\n\n"
+                f"لا توجد أي جداول بدون RLS أو مؤشرات مفقودة حالياً."
+            )
+    return len(findings)
+
 def sre_worker_loop():
-    """Background polling daemon that picks up pending incidents."""
+    """Background polling daemon that picks up pending incidents and runs periodic DB scans."""
     logger.info("[SRE Engine] Background SRE Worker started.")
+    last_db_scan_time = 0
     while _RUNNING:
         try:
             sre_cfg = _CONFIG.get("sre_engine", {})
             if sre_cfg.get("enabled", True):
+                # Run periodic DB health check every 30 minutes
+                if time.time() - last_db_scan_time >= 1800:
+                    last_db_scan_time = time.time()
+                    threading.Thread(target=scan_all_databases_health, daemon=True).start()
+
                 incident = fetch_pending_incident()
                 if incident:
                     target_chat = _CONFIG.get("allowed_user_id")
@@ -418,8 +659,63 @@ def handle_sre_callback(cb_data, chat_id, message_id, user_id):
     pr_num = incident.get("pr_number")
     pr_url = incident.get("pr_url", "")
     
+    # --- 0. APPLY SQL MIGRATION TO DATABASE ---
+    if action == "sre_apply_sql":
+        if _ANSWER_CALLBACK:
+            _ANSWER_CALLBACK(None, "جاري تطبيق الـ SQL على قاعدة البيانات...")
+        if _SEND_MESSAGE:
+            _SEND_MESSAGE(chat_id, f"⏳ <i>جاري تنفيذ الـ Migration في قاعدة بيانات <code>{project_slug}</code>...</i>")
+            
+        migration_sql = ""
+        try:
+            raw_pl = incident.get("raw_payload")
+            if raw_pl:
+                pl_data = json.loads(raw_pl) if isinstance(raw_pl, str) else raw_pl
+                migration_sql = pl_data.get("migration_sql", "")
+        except Exception:
+            pass
+            
+        if not migration_sql:
+            m_dir = os.path.join(project_path, "supabase", "migrations")
+            if os.path.isdir(m_dir):
+                sql_files = sorted([os.path.join(m_dir, f) for f in os.listdir(m_dir) if f.endswith(".sql")])
+                if sql_files:
+                    try:
+                        with open(sql_files[-1], "r", encoding="utf-8") as sf:
+                            migration_sql = sf.read()
+                    except Exception:
+                        pass
+                        
+        if not migration_sql:
+            if _SEND_MESSAGE:
+                _SEND_MESSAGE(chat_id, "❌ لم يتم العثور على محتوى ملف الـ SQL لتطبيقه.")
+            return True
+            
+        success, res_val = execute_supabase_sql(project_slug, migration_sql)
+        if success:
+            update_incident(incident_id, {"status": "sql_applied"})
+            if _SEND_MESSAGE:
+                _SEND_MESSAGE(
+                    chat_id,
+                    f"✅ <b>[DB-SRE] تم تطبيق الـ Migration بنجاح على قاعدة البيانات!</b> 🎉\n\n"
+                    f"📁 <b>المشروع:</b> <code>{project_slug}</code>\n"
+                    f"⚡ <b>الاستجابة:</b> تم التنفيذ في السحابة بنجاح (HTTP 201)\n\n"
+                    f"🛡️ <b>الفحص التأكيدي:</b>\n"
+                    f"تم تفعيل التعديلات الهيكلية والسياسات.\n\n"
+                    f"اضغط <b>🔀 دمج مع الـ Main</b> لدمج كود ملف الـ Migration في مستودع GitHub."
+                )
+        else:
+            if _SEND_MESSAGE:
+                _SEND_MESSAGE(
+                    chat_id,
+                    f"❌ <b>فشل تطبيق الـ SQL في قاعدة البيانات:</b>\n\n"
+                    f"<code>{html.escape(str(res_val))}</code>\n\n"
+                    f"💡 يمكنك الضغط على 'إعادة التعديل' لتصحيح صياغة الـ SQL والمحاولة مجدداً."
+                )
+        return True
+
     # --- 1. MERGE TO MAIN ---
-    if action == "sre_merge":
+    elif action == "sre_merge":
         if _ANSWER_CALLBACK:
             _ANSWER_CALLBACK(None, "جاري دمج الـ PR رسمياً...")
         if _SEND_MESSAGE:

@@ -1284,6 +1284,7 @@ def sync_telegram_commands():
             ("menu", "📱 إظهار لوحة الأزرار السريعة المثبتة"),
             ("context", "🧠 سعة الذاكرة ومؤشر سياق المحادثة"),
             ("compact", "🗜️ ضغط الذاكرة الفوري وتكثيف السياق"),
+            ("db_scan", "🗄️ فحص شامل لأمان وأداء قواعد البيانات"),
             ("stop", "🛑 إيقاف المهمة الجارية حالياً")
         ]
         
@@ -3196,6 +3197,13 @@ def handle_command(chat_id, user_id, text):
             send_message(chat_id, msg)
         else:
             send_message(chat_id, "⚠️ محرك ضغط السياق غير متصل.")
+
+    elif cmd in ["/db_scan", "/db_health", "/db"]:
+        if sre_engine:
+            send_message(chat_id, "🔍 <i>جاري فحص سلامة وأمان وأداء قواعد البيانات (Advisors & Security Scan)...</i>")
+            threading.Thread(target=sre_engine.scan_all_databases_health, args=(chat_id,), daemon=True).start()
+        else:
+            send_message(chat_id, "⚠️ محرك SRE غير متصل.")
 
     elif cmd in ["/incidents", "/sre"]:
         if sre_engine:
