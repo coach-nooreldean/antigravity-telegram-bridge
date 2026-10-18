@@ -30,6 +30,11 @@ try:
 except ImportError:
     analytics_engine = None
 
+try:
+    import context_engine
+except ImportError:
+    context_engine = None
+
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 def load_config():
@@ -554,6 +559,10 @@ def get_task_action_buttons(ws=None):
             file_btns.append({"text": f"📥 تحميل {fname}", "callback_data": f"file_get:{f}"})
         rows.append(file_btns)
 
+    rows.append([
+        {"text": "🧠 مؤشر الذاكرة", "callback_data": "ctx:refresh"},
+        {"text": "🗜️ ضغط السياق", "callback_data": "ctx:compact"}
+    ])
     rows.append([
         {"text": "➕ جلسة جديدة", "callback_data": "conv:new"},
         {"text": "💬 الجلسات", "callback_data": "conv:list"}
@@ -1273,6 +1282,8 @@ def sync_telegram_commands():
             ("restart", "🔄 إعادة تشغيل خدمة البوت عن بُعد"),
             ("pr", "🌿 إنشاء أو فحص Pull Request على GitHub"),
             ("menu", "📱 إظهار لوحة الأزرار السريعة المثبتة"),
+            ("context", "🧠 سعة الذاكرة ومؤشر سياق المحادثة"),
+            ("compact", "🗜️ ضغط الذاكرة الفوري وتكثيف السياق"),
             ("stop", "🛑 إيقاف المهمة الجارية حالياً")
         ]
         
@@ -1571,6 +1582,9 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
     workspace, mode_desc = get_effective_workspace()
     agy_bin = CONFIG.get("agy_bin", "/home/nooreldean/.local/bin/agy")
     
+    if context_engine:
+        prompt = context_engine.prepare_prompt_with_context(prompt, workspace)
+    
     with active_task_lock:
         if current_task_info["running"]:
             send_message(chat_id, "⚠️ هناك مهمة سابقة قيد التنفيذ حالياً، انتظر حتى تنتهي أو اكتب /stop لإيقافها.")
@@ -1669,12 +1683,17 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
                 except Exception:
                     pass
 
+            ctx_meter = ""
+            if context_engine:
+                ctx_meter = f"\n{context_engine.format_live_context_badge(target_cid)}"
+
             if status_msg_id:
                 progress_text = (
                     f"{spinner} <b>جاري التنفيذ المباشر...</b>\n"
                     f"{skill_banner}{agent_banner}{conv_banner}"
                     f"<code>{escape_html(prompt[:140])}</code>\n\n"
                     f"⏱️ <b>الوقت المنقضي:</b> {elapsed_str}{step_line}"
+                    f"{ctx_meter}"
                     f"{action_line}\n"
                     f"📁 <i>المسار ({mode_desc}):</i> <code>{escape_html(workspace)}</code>"
                 )
@@ -1861,7 +1880,26 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
                 opt_buttons.append([{"text": f"👉 {opt['label']}", "callback_data": f"pick_opt:{q_id}:{opt['index']}"}])
             action_markup["inline_keyboard"] = opt_buttons + action_markup["inline_keyboard"]
 
-        send_message(chat_id, header + f"<pre>{escape_html(result_text)}</pre>", reply_markup=action_markup)
+        # Continuous Context Compaction & Hard Cap Check after every message
+        ctx_footer = ""
+        did_rollover = False
+        rollover_notice = ""
+        if context_engine:
+            try:
+                did_rollover, rollover_notice, ctx_stats = context_engine.compress_after_message(
+                    CONFIG.get("current_conversation_id"),
+                    workspace,
+                    prompt,
+                    result_text
+                )
+                ctx_footer = f"\n\n{ctx_stats['meter_badge']} | 🗜️ <i>تم ضغط السياق</i>"
+            except Exception as ce:
+                print(f"[ContextEngine error] {ce}")
+
+        send_message(chat_id, header + f"<pre>{escape_html(result_text)}</pre>" + ctx_footer, reply_markup=action_markup)
+
+        if did_rollover and rollover_notice:
+            send_message(chat_id, rollover_notice)
 
         # Auto-deliver newly generated media / artifacts
         try:
@@ -2475,11 +2513,27 @@ def handle_command(chat_id, user_id, text):
                     is_sre=False
                 )
                 summary = res.get("review_summary") or "تم إنجاز الهدف واعتماده بنجاح."
+                ctx_append = ""
+                if context_engine:
+                    try:
+                        did_roll, roll_msg, ctx_st = context_engine.compress_after_message(
+                            CONFIG.get("current_conversation_id"),
+                            ws,
+                            arg,
+                            summary
+                        )
+                        ctx_append = f"\n\n{ctx_st['meter_badge']} | 🗜️ <i>تم ضغط السياق</i>"
+                        if did_roll and roll_msg:
+                            send_message(chat_id, roll_msg)
+                    except Exception as ce:
+                        print(f"[ContextEngine error in tri_goal] {ce}")
+
                 msg_out = (
                     "🎉 <b>اكتمل الهدف بنجاح عبر خط الإنتاج الثلاثي!</b>\n\n"
                     f"📋 <b>الهدف:</b> <code>{escape_html(arg)}</code>\n\n"
                     "🛡️ <b>تقرير الاعتماد النهائي (Claude Opus Thinking):</b>\n"
                     f"<i>{escape_html(summary)}</i>"
+                    f"{ctx_append}"
                 )
                 send_message(chat_id, msg_out)
             except Exception as e:
@@ -3129,6 +3183,20 @@ def handle_command(chat_id, user_id, text):
         else:
             send_message(chat_id, "⚠️ محرك توليد الاختبارات غير متصل حالياً.")
 
+    elif cmd in ["/context", "/memory", "/ctx"]:
+        if context_engine:
+            card_text, card_markup = context_engine.get_context_card_markup()
+            send_message(chat_id, card_text, reply_markup=card_markup)
+        else:
+            send_message(chat_id, "⚠️ محرك تتبع الذاكرة غير متصل.")
+
+    elif cmd in ["/compact", "/compress"]:
+        if context_engine:
+            _, msg = context_engine.force_immediate_compaction()
+            send_message(chat_id, msg)
+        else:
+            send_message(chat_id, "⚠️ محرك ضغط السياق غير متصل.")
+
     elif cmd in ["/incidents", "/sre"]:
         if sre_engine:
             headers = sre_engine.get_supabase_headers()
@@ -3207,6 +3275,8 @@ def main():
         sre_engine.init_sre_engine(CONFIG, send_message, edit_message_text, answer_callback_query, run_agent_task)
     if analytics_engine:
         analytics_engine.init_analytics_engine(CONFIG, send_message, edit_message_text)
+    if context_engine:
+        context_engine.init_context_engine(CONFIG, send_message, edit_message_text, answer_callback_query, save_config)
     offset = None
     
     # Send online notification if user id already exists
@@ -3246,6 +3316,10 @@ def main():
 
                     if cb_data.startswith("sre_"):
                         if sre_engine and sre_engine.handle_sre_callback(cb_data, chat_id, cb.get("message", {}).get("message_id"), user_id):
+                            continue
+
+                    if cb_data.startswith("ctx:"):
+                        if context_engine and context_engine.handle_context_callback(chat_id, cb.get("message", {}).get("message_id"), cb_data):
                             continue
 
                     if cb_data.startswith("model:"):
