@@ -3,6 +3,7 @@ set -e
 
 # ==========================================================
 # Antigravity Telegram Bridge - Interactive Setup Script
+# Powerhouse Edition: Multi-Project, Live Tunnel, Inline Grill
 # Works on Linux (Debian, Ubuntu, Arch, Fedora) and macOS
 # ==========================================================
 
@@ -10,10 +11,12 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}====================================================${NC}"
 echo -e "${GREEN}    🚀 Antigravity Telegram Bridge Installer        ${NC}"
+echo -e "${CYAN}         Powerhouse Full-Stack Edition              ${NC}"
 echo -e "${BLUE}====================================================${NC}"
 
 # Check Python 3
@@ -62,7 +65,7 @@ if [ "$BOT_LANG" == "ar" ]; then
     echo -e "${YELLOW}احصل على توكن البوت من @BotFather في تيليجرام:${NC}"
     read -rp "أدخل توكن البوت (Telegram Bot Token): " BOT_TOKEN
 else
-    echo -e "${YELLOW}Get your Telegram Bot Token from @BotFather:${NC}"
+    echo -e "${YELLOW}Get your Telegram Bot Token from @BotFather on Telegram:${NC}"
     read -rp "Enter your Telegram Bot Token: " BOT_TOKEN
 fi
 
@@ -71,14 +74,43 @@ if [ -z "$BOT_TOKEN" ]; then
     exit 1
 fi
 
+# Projects Root directory for /projects command
+DEFAULT_PROJECTS_DIR="$HOME/projects"
+if [ ! -d "$DEFAULT_PROJECTS_DIR" ]; then
+    DEFAULT_PROJECTS_DIR="$(dirname "$PWD")"
+fi
+
+echo ""
+if [ "$BOT_LANG" == "ar" ]; then
+    read -rp "أدخل مسار المجلد الرئيسي لمشاريعك (projects root) لاستخدام /projects (افتراضي: $DEFAULT_PROJECTS_DIR): " USER_PROJECTS_DIR
+else
+    read -rp "Enter your root projects directory for the /projects switcher (default: $DEFAULT_PROJECTS_DIR): " USER_PROJECTS_DIR
+fi
+PROJECTS_ROOT="${USER_PROJECTS_DIR:-$DEFAULT_PROJECTS_DIR}"
+
 # Default project workspace
 DEFAULT_WS="$PWD"
 if [ "$BOT_LANG" == "ar" ]; then
-    read -rp "أدخل مسار مجلد مشاريعك الافتراضي (افتراضي: $DEFAULT_WS): " USER_WS
+    read -rp "أدخل مسار مشروع العمل الافتراضي (default workspace) (افتراضي: $DEFAULT_WS): " USER_WS
 else
-    read -rp "Enter your default project workspace path (default: $DEFAULT_WS): " USER_WS
+    read -rp "Enter your default working workspace path (default: $DEFAULT_WS): " USER_WS
 fi
 CURRENT_WS="${USER_WS:-$DEFAULT_WS}"
+
+# Check optional tools
+echo -e "\n${BLUE}[*] Checking recommended utilities...${NC}"
+
+if command -v cloudflared &> /dev/null; then
+    echo -e "${GREEN}[+] Cloudflared found: Live web previews (/preview, /servers) ready!${NC}"
+else
+    echo -e "${YELLOW}[i] Cloudflared not found (Optional). Needed only for live web preview tunnels (/preview).${NC}"
+fi
+
+if command -v ffmpeg &> /dev/null; then
+    echo -e "${GREEN}[+] FFmpeg found: Audio/video processing ready!${NC}"
+else
+    echo -e "${YELLOW}[i] FFmpeg not found (Optional). Needed for voice note conversion.${NC}"
+fi
 
 # Install requirements
 echo -e "\n${BLUE}[*] Installing dependencies (requests)...${NC}"
@@ -90,10 +122,15 @@ cat << CONF > config.json
   "bot_token": "${BOT_TOKEN}",
   "allowed_user_id": null,
   "language": "${BOT_LANG}",
+  "projects_root": "${PROJECTS_ROOT}",
   "workspace_mode": "auto",
   "current_workspace": "${CURRENT_WS}",
   "current_model": "default",
   "current_effort": "default",
+  "auto_failover": true,
+  "task_timeout_seconds": 600,
+  "sentry_url": "",
+  "force_new": false,
   "agy_bin": "${AGY_PATH}"
 }
 CONF
