@@ -37,8 +37,9 @@ DEFAULT_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmF
 DEFAULT_PROJECTS_MAP = {
     "nooreldean-super-app": "/mnt/data2/documents/githup/NOORELDEAN COACHING/nooreldean-super-app",
     "nooreldean-super-app2": "/mnt/data2/documents/githup/NOORELDEAN COACHING/nooreldean-super-app",
+    "nooreldeancoaching-website": "/mnt/data2/documents/githup/NOORELDEAN COACHING/nooreldeancoaching.tech-next.js-main",
+    "website": "/mnt/data2/documents/githup/NOORELDEAN COACHING/nooreldeancoaching.tech-next.js-main",
     "nooreldean-life-os": "/mnt/data2/documents/githup/nooreldean-life-os",
-    "website": "/mnt/data2/documents/githup/nooreldean-life-os",
     "antigravity-telegram-bridge": "/mnt/data2/documents/githup/antigravity-telegram-bridge",
     "coachdrift": "/mnt/data2/documents/githup/coach-nooreldean",
     "coach-os": "/mnt/data2/documents/githup/coach-nooreldean"
@@ -66,11 +67,11 @@ SUPABASE_PROJECTS_REGISTRY = {
         "mcp_server": "supabase-super-app",
         "workspace": "/mnt/data2/documents/githup/NOORELDEAN COACHING/nooreldean-super-app"
     },
-    "nooreldean-life-os": {
-        "name": "Website / Life OS Database",
+    "nooreldeancoaching-website": {
+        "name": "Website Database",
         "ref": "ctzdbltuamcbctxwzlly",
         "mcp_server": "supabase-website",
-        "workspace": "/mnt/data2/documents/githup/nooreldean-life-os"
+        "workspace": "/mnt/data2/documents/githup/NOORELDEAN COACHING/nooreldeancoaching.tech-next.js-main"
     },
     "coachdrift": {
         "name": "Coach OS Database",
@@ -551,6 +552,8 @@ def scan_all_databases_health(target_chat_id=None):
       AND event_message NOT ILIKE '%could not receive data from client%'
       AND event_message NOT ILIKE '%connection to client lost%'
       AND event_message NOT ILIKE '%password authentication failed%'
+      AND event_message NOT ILIKE '%Warp server error%'
+      AND event_message NOT ILIKE '%timeout manager%'
     ORDER BY timestamp DESC
     LIMIT 10
     """
