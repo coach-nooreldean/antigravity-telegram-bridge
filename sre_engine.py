@@ -531,29 +531,29 @@ def scan_all_databases_health(target_chat_id=None):
     start_iso = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     end_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     
-    # Precise ClickHouse SQL filtering for true application failure logs
+    # Precise ClickHouse SQL filtering for true application failure logs only:
+    # 1. PostgreSQL engine errors (ERROR:, FATAL:, PANIC:)
+    # 2. PostgREST HTTP 5xx server errors (500, 502, 503)
+    # Strictly ignores: 200/201/204 HTTP access logs, schema cache reload, client disconnects
     log_query = """
-    SELECT id, timestamp, event_message
+    SELECT id, timestamp, event_message, source
     FROM logs
     WHERE (
-            event_message ILIKE '%error%' 
-            OR event_message ILIKE '%fatal%' 
-            OR event_message ILIKE '%panic%' 
-            OR event_message ILIKE '%permission denied%' 
-            OR event_message ILIKE '%syntax error%' 
-            OR event_message ILIKE '%does not exist%' 
-            OR event_message ILIKE '%violates%' 
-            OR event_message ILIKE '%deadlock%' 
-            OR event_message ILIKE '%PGRST%'
+            (source = 'postgres_logs' AND (
+               event_message LIKE 'ERROR:%' 
+               OR event_message LIKE 'FATAL:%' 
+               OR event_message LIKE 'PANIC:%'
+            ))
+            OR
+            (source = 'postgrest_logs' AND (
+               event_message LIKE '% | 500 | %' 
+               OR event_message LIKE '% | 502 | %' 
+               OR event_message LIKE '% | 503 | %'
+            ))
           )
-      AND event_message NOT ILIKE '%schema cache reload%'
-      AND event_message NOT ILIKE '%connected to PostgreSQL%'
-      AND event_message NOT ILIKE '%statement:%'
       AND event_message NOT ILIKE '%could not receive data from client%'
       AND event_message NOT ILIKE '%connection to client lost%'
       AND event_message NOT ILIKE '%password authentication failed%'
-      AND event_message NOT ILIKE '%Warp server error%'
-      AND event_message NOT ILIKE '%timeout manager%'
     ORDER BY timestamp DESC
     LIMIT 10
     """
