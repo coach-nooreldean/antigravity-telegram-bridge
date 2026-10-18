@@ -1886,7 +1886,7 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
             elif not force_new:
                 cmd.append("-c")
 
-        cmd.extend(["-p", prompt, "--dangerously-skip-permissions"])
+        cmd.extend(["-p", prompt, "--dangerously-skip-permissions", "--disable-slash-commands"])
 
         max_attempts = len(list_saved_accounts()[0]) if CONFIG.get("auto_failover", True) else 1
         max_attempts = max(1, min(max_attempts, 6))
