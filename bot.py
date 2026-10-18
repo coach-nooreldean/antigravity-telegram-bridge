@@ -62,6 +62,7 @@ API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 active_task_lock = threading.Lock()
 current_task_info = {"running": False, "process": None, "prompt": "", "start_time": 0}
 active_question_state = {}
+active_extracted_options = {}
 
 # ==========================================
 # Multi-Language Localization Engine (EN / AR)
@@ -345,6 +346,38 @@ def get_task_action_buttons(ws=None):
 # ==========================================
 # Artifacts, Media & Background Daemons
 # ==========================================
+def extract_interactive_options(text):
+    """
+    Parses questions and multiple-choice options from agent output text
+    so they can be converted into interactive Telegram buttons.
+    """
+    if not text:
+        return []
+    options = []
+    pattern = re.compile(r'^(?:(?:\d+|[A-Da-d])[\.\-\)]|\([0-9A-Za-z]\))\s+(.+)$', re.MULTILINE)
+    matches = pattern.findall(text)
+    if matches and len(matches) >= 2:
+        for idx, m in enumerate(matches[:5]):
+            clean_opt = re.sub(r'[*_`#]', '', m).strip()
+            if ":" in clean_opt:
+                short_title = clean_opt.split(":", 1)[0].strip()
+            elif " - " in clean_opt:
+                short_title = clean_opt.split(" - ", 1)[0].strip()
+            else:
+                short_title = clean_opt
+            if len(short_title) > 35 and "(" in short_title:
+                clean_short = re.sub(r'\(.*?\)', '', short_title).strip()
+                if clean_short:
+                    short_title = clean_short
+            if len(short_title) > 35:
+                short_title = short_title[:32] + "..."
+            options.append({
+                "index": idx + 1,
+                "label": f"{idx + 1}️⃣ {short_title}",
+                "full_text": clean_opt[:120]
+            })
+    return options
+
 def find_newly_generated_media(workspace, start_time, max_files=4):
     """Auto-detects image and design files created/modified during agent execution."""
     media_exts = ('.png', '.jpg', '.jpeg', '.webp', '.svg')
@@ -579,7 +612,17 @@ def run_agent_task(chat_id, prompt, agent_name=None, extra_args=None, banner_tit
 
         result_text = stdout.strip() if stdout else (stderr.strip() if stderr else "Task executed without text output.")
         header = f"✅ <b>Done ({duration}s):</b>\n\n"
-        send_message(chat_id, header + f"<pre>{escape_html(result_text[:3500])}</pre>", reply_markup=get_task_action_buttons(workspace))
+        detected_options = extract_interactive_options(result_text)
+        action_markup = get_task_action_buttons(workspace)
+        if detected_options:
+            opt_buttons = []
+            q_id = int(time.time())
+            active_extracted_options[q_id] = detected_options
+            for opt in detected_options:
+                opt_buttons.append([{"text": f"👉 {opt['label']}", "callback_data": f"pick_opt:{q_id}:{opt['index']}"}])
+            action_markup["inline_keyboard"] = opt_buttons + action_markup["inline_keyboard"]
+
+        send_message(chat_id, header + f"<pre>{escape_html(result_text[:3500])}</pre>", reply_markup=action_markup)
 
         # Auto-deliver generated artifacts
         try:
@@ -674,6 +717,19 @@ def handle_command(chat_id, user_id, text):
 
     elif cmd in ["/pr", "/pullrequest"]:
         handle_pr_workflow(chat_id, ws, arg)
+
+    elif cmd in ["/grill-me", "/grill_me", "/grill"]:
+        topic = arg.strip() if arg.strip() else "Interview and grill me about the best architectural improvements and features to add to this project."
+        grill_prompt = (
+            f"Activate the grilling skill. Interview and grill the user about this topic, idea, or plan: '{topic}'.\n\n"
+            f"STRICT INTERACTIVE RULES YOU MUST STRICTLY FOLLOW:\n"
+            f"1. Ask exactly ONE single question at a time. NEVER dump multiple questions (like Q1, Q2, Q3) in one message.\n"
+            f"2. For your question, provide 2 to 4 clear, numbered choices (1., 2., 3., 4.) with concise bold titles (e.g. 1. **Option Title**: description).\n"
+            f"3. Mark your recommended choice with (Recommended).\n"
+            f"4. STOP completely and wait for the user to pick an option before asking anything else.\n"
+            f"5. Start by briefly reviewing the project, then ask Question 1 with its numbered options."
+        )
+        threading.Thread(target=run_agent_task, args=(chat_id, grill_prompt), daemon=True).start()
 
     elif cmd in ["/screenshot", "/shot"]:
         media_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
