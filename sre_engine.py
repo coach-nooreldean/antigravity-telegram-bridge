@@ -616,7 +616,8 @@ def scan_all_databases_health(target_chat_id=None):
     incidents_url = f"{get_supabase_url()}/rest/v1/incident_queue"
     for f in findings:
         try:
-            check_url = f"{incidents_url}?issue_title=eq.{urllib.parse.quote(f['issue_title'])}&status=in.(pending,in_progress,pr_opened,awaiting_approval)&limit=1"
+            # Do not re-queue issues that are already active, resolved, or explicitly ignored
+            check_url = f"{incidents_url}?issue_title=eq.{urllib.parse.quote(f['issue_title'])}&status=in.(pending,in_progress,pr_opened,awaiting_approval,resolved,ignored)&limit=1"
             c_res = requests.get(check_url, headers=headers, timeout=5)
             if c_res.status_code == 200 and len(c_res.json()) > 0:
                 continue
